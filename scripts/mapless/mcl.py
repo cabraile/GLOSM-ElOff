@@ -173,7 +173,7 @@ class MCL:
         self.particles = self.particles[indices]
 
     def weigh_traffic_signal_detection(self, sensitivity : float, false_positive_rate : float) -> None:
-        """"""
+        """TODO: Something is wrong: the particles that are after the traffic signal are still there after the update."""
         particles_as_points = [ Point(self.particles[i,0], self.particles[i,1]) for i in range(len(self.particles)) ]
         weights = []
         normalizer_factor = 1. / (sensitivity + false_positive_rate)
@@ -204,7 +204,7 @@ class MCL:
             # Check if should be visualized
             bearing_magnitude = np.linalg.norm(traffic_signal_particle_frame)
             bearing_angle_rad = np.arctan2(traffic_signal_particle_frame[1], traffic_signal_particle_frame[0])
-            bearing_angle_deg = np.deg2rad(bearing_angle_rad)
+            bearing_angle_deg = np.rad2deg(bearing_angle_rad)
             is_in_sight = ( bearing_magnitude < 20.0 ) and ( np.abs(bearing_angle_deg) < 70.0 )
             if is_in_sight:
                 weights.append( normalizer_factor * sensitivity)
