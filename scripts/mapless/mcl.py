@@ -5,6 +5,8 @@ import scipy.stats
 
 import geopandas as gpd
 from shapely.geometry import Point, Polygon
+import rasterio
+import rasterio.transform
 
 from mapless.rotation import normalize_orientation, build_2d_rotation_matrix, rotation_matrix_from_euler_angles
 from mapless.draw import draw_pose_2d
@@ -62,13 +64,26 @@ class MCL:
     """Distance-Route-based Monte Carlo Localization."""
 
     def __init__(self) -> None:
-        self.particles = None
-        self.driveable_map = None
-        self.local_driveable_map = None
-        self.traffic_signals_map = None
+        self.particles              = None
+
+        # Map layers
+        self.dsm_array              = None
+        self.dsm_transform          = None
+        self.stop_signs_map         = None
+        self.local_stop_signs_map   = None
+        self.driveable_map          = None
+        self.local_driveable_map    = None
+        self.traffic_signals_map    = None
         self.local_traffic_signals_map = None
-        self.local_map_boundaries = None
-        self.local_map_size = 200.0
+
+        # Local boundaries
+        self.local_map_boundaries   = None
+        self.local_map_size         = 200.0
+
+        # ElOff
+        self.eloff_global_z_accumulator = 0.0
+        self.eloff_global_z_variance = 0.0
+        self.eloff_particles_z_accumulator = np.zeros((0))
     
     # Map-related
     # ================================
@@ -80,6 +95,10 @@ class MCL:
         is_y_boundary_ok = ( self.local_map_boundaries["y_min"] <= y_min - tolerance_meters ) and ( self.local_map_boundaries["y_max"] >= y_max + tolerance_meters ) 
         return not ( is_x_boundary_ok and is_y_boundary_ok )
 
+    def set_digital_surface_model_map(self, raster : rasterio.DatasetReader) -> None:
+        self.dsm_array = raster.read().squeeze()
+        self.dsm_transform = raster.transform
+
     def set_driveable_map(self, driveable_map : gpd.GeoDataFrame) -> None:
         self.driveable_map = driveable_map
         self.local_driveable_map = None
@@ -88,7 +107,12 @@ class MCL:
         self.traffic_signals_map = traffic_signals_map
         self.local_traffic_signals_map = None
 
+    def set_stop_signs_map(self, stop_signs_map : gpd.GeoDataFrame) -> None:
+        self.stop_signs_map = stop_signs_map
+        self.local_stop_signs_map = None
+
     def load_local_region_map(self, center_x : float, center_y : float, region_size : float ) -> None:
+        # Create bounding box area
         x_min = center_x - region_size/2.0
         x_max = center_x + region_size/2.0
         y_min = center_y - region_size/2.0
@@ -103,13 +127,33 @@ class MCL:
             Point(x_min,y_max), # top left
         ])
         bounding_box_gdf = gpd.GeoDataFrame(geometry=gpd.GeoSeries(bounding_box_poly, crs = self.driveable_map.crs) )
+        
+        # Filter local elements
         self.local_driveable_map = self.driveable_map.overlay(bounding_box_gdf, keep_geom_type=True)
         self.local_traffic_signals_map = self.traffic_signals_map.overlay(bounding_box_gdf, keep_geom_type=True)
+        self.local_stop_signs_map = self.stop_signs_map.overlay(bounding_box_gdf, keep_geom_type=True)
 
     # ================================
 
     def get_particles(self) -> np.ndarray:
         return self.particles
+
+    def get_dsm_z_at(self, xy_array : np.ndarray) -> np.ndarray:
+        """    
+        """
+        particles_xy = xy_array[:,:2]
+        particles_row_col = rasterio.transform.rowcol(transform=self.dsm_transform, xs=particles_xy[:,0], ys=particles_xy[:,1])
+        particles_row_col_array = np.stack(particles_row_col, axis=1)
+
+        nrows, ncols = self.dsm_array.shape
+        particles_rows = np.array(particles_row_col[0])
+        particles_cols = np.array(particles_row_col[1])
+        mask_oob = (particles_rows < 0) | (particles_rows >= nrows) | (particles_cols < 0) | (particles_cols >= ncols)
+        mask_in_bounds = ~mask_oob
+
+        dsm_z = np.full((len(self.particles)), np.nan)
+        dsm_z[mask_in_bounds] = self.dsm_array[particles_row_col_array[mask_in_bounds,0], particles_row_col_array[mask_in_bounds,1]]
+        return dsm_z
 
     def plot(self, ax : plt.Axes) -> None:
         for i in range(len(self.particles)):
@@ -125,7 +169,12 @@ class MCL:
         self.particles = np.random.multivariate_normal(mean = mean, cov = covariance, size = n_particles)
         self.particles[:,2] = normalize_orientation(self.particles[:,2])
 
-    def predict(self, control_array : np.ndarray, covariance : np.ndarray) -> None:
+        # ElOff
+        self.eloff_global_z_accumulator = 0.0
+        self.eloff_global_z_variance = 0.0
+        self.eloff_particles_z_accumulator = np.zeros((n_particles))
+
+    def predict(self, control_array : np.ndarray, covariance : np.ndarray, z_offset : float, z_variance : float) -> None:
         """Performs state prediction based on the control commands given and the 
         covariance matrix.
         """
@@ -141,8 +190,19 @@ class MCL:
         u_proj = np.hstack([ offsets_array.reshape(-1,2), broadcast_yaw.reshape(-1,1) ]).reshape(-1,3)
 
         noise_array = np.random.multivariate_normal( mean=np.zeros_like(u.flatten()), cov=covariance , size=len(self.particles))
-        self.particles += ( u_proj + noise_array.reshape(-1,3) )
-        self.particles[:,2] = normalize_orientation(self.particles[:,2])
+        new_particles = self.particles + ( u_proj + noise_array.reshape(-1,3) )
+        new_particles[:,2] = normalize_orientation(new_particles[:,2])
+
+        # ElOff
+        self.eloff_global_z_accumulator += z_offset
+        self.eloff_global_z_variance += z_variance
+
+        particles_z_before = self.get_dsm_z_at(self.particles)
+        particles_z_after = self.get_dsm_z_at(new_particles)
+        self.eloff_particles_z_accumulator += (particles_z_after - particles_z_before)
+
+        # Replace old particle values by the new ones
+        self.particles = new_particles
 
     def resample(self, weights : np.ndarray) -> None:
         ids = low_variance_sampler(weights)
@@ -173,7 +233,6 @@ class MCL:
         self.particles = self.particles[indices]
 
     def weigh_traffic_signal_detection(self, sensitivity : float, false_positive_rate : float) -> None:
-        """TODO: Something is wrong: the particles that are after the traffic signal are still there after the update."""
         particles_as_points = [ Point(self.particles[i,0], self.particles[i,1]) for i in range(len(self.particles)) ]
         weights = []
         normalizer_factor = 1. / (sensitivity + false_positive_rate)
@@ -205,7 +264,7 @@ class MCL:
             bearing_magnitude = np.linalg.norm(traffic_signal_particle_frame)
             bearing_angle_rad = np.arctan2(traffic_signal_particle_frame[1], traffic_signal_particle_frame[0])
             bearing_angle_deg = np.rad2deg(bearing_angle_rad)
-            is_in_sight = ( bearing_magnitude < 20.0 ) and ( np.abs(bearing_angle_deg) < 70.0 )
+            is_in_sight = ( bearing_magnitude < 10.0 ) and ( np.abs(bearing_angle_deg) < 40.0 )
             if is_in_sight:
                 weights.append( normalizer_factor * sensitivity)
             else:
@@ -214,6 +273,28 @@ class MCL:
         weights = np.array( weights )
         indices = low_variance_sampler(weights)
         self.particles = self.particles[indices]
+
+    def weigh_eloff(self) -> None:
+        valid_particles_mask = ~np.isnan(self.eloff_particles_z_accumulator)
+        weights = np.zeros((len(self.particles)))
+        delta_z_mean = self.eloff_global_z_accumulator
+        delta_z_stddev = self.eloff_global_z_variance ** 0.5
+        delta_z_particles = self.eloff_particles_z_accumulator[valid_particles_mask]
+        mahalanobis = np.abs( delta_z_particles - delta_z_mean)/(delta_z_stddev+0.001)
+        weights[valid_particles_mask] = 1./(mahalanobis+0.001)
+
+        sum_w = np.sum(weights)
+        if sum_w <= 1e-10:
+            return
+        weights_norm = weights / np.sum(sum_w)
+
+        indices = low_variance_sampler(weights_norm)
+        self.particles = self.particles[indices]
+
+        # Reset acummulators
+        self.eloff_global_z_accumulator = 0.0
+        self.eloff_global_z_variance = 0.0
+        self.eloff_particles_z_accumulator = np.zeros((self.particles))
 
     # =========================================================================
 

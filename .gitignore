@@ -1,6 +1,6 @@
 .vscode/
 .cached/
-output/
-yolov5s.pt
+output*
+*.pt
 __pycache__/
 *.pyc
