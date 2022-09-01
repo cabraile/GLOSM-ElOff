@@ -2,7 +2,8 @@ from datetime import timedelta
 from typing import Optional, Tuple
 import numpy as np
 
-from rotation import normalize_angle, rotation_matrix_from_euler_angles, partial_rotation_matrix
+from mapless.rotation import normalize_angle, rotation_matrix_from_euler_angles, partial_rotation_matrix
+from scipy.spatial.transform import Rotation
 
 class EKF3D:
     """Implements the 6DoF state estimation EKF.
@@ -96,6 +97,26 @@ class EKF3D:
         self.mean = np.vstack((position, orientation, velocity, angular_velocity))
         self.timestamp = timestamp
 
+    # def predict_pose3d(self, delta_xyz : np.ndarray, delta_rpy : np.ndarray , cov : np.ndarray) -> None:
+    #     delta_roll, delta_pitch, delta_yaw = delta_rpy.flatten()
+    #     R_from_current_to_prev = rotation_matrix_from_euler_angles(roll = delta_roll, pitch = delta_pitch, yaw = delta_yaw)
+    #     T_from_current_to_prev = np.eye(4)
+    #     T_from_current_to_prev[:3,:3] = R_from_current_to_prev
+    #     T_from_current_to_prev[:3, 3] = delta_xyz.flatten()
+
+    #     xyz, rpy, _, _ = self.split_state(self.mean)
+    #     T_from_prev_to_world = np.eye(4)
+    #     T_from_prev_to_world[:3,:3] = rotation_matrix_from_euler_angles(rpy[0], rpy[1], rpy[2])
+    #     T_from_prev_to_world[:3, 3] = xyz.flatten()
+        
+    #     T_from_current_to_world = T_from_prev_to_world @ T_from_current_to_prev
+
+    #     # TODO: probably something is wrong, double check later
+    #     self.xyz = T_from_current_to_world[:3, 3].reshape(3,1)
+    #     R_from_current_to_world = T_from_current_to_world[:3,:3]
+    #     self.rpy = Rotation.from_matrix(R_from_current_to_world).as_euler("xyz", degrees=False).reshape(3,1)
+    #     self.covariance += cov
+        
     def update_imu_orientation(self, orientation_angles_rpy : np.ndarray, angular_velocity_rpy : np.ndarray , timestamp : float, Q : np.ndarray) -> None:
         """
         Arguments
@@ -131,11 +152,7 @@ class EKF3D:
         # Current timestamp changes!
         self.timestamp = timestamp
 
-    def update_pose2d(self, x : float, y : float, yaw : float, timestamp : float, Q : np.ndarray) -> None:
-        # Performs a prediction for matching the current estimation of the 
-        # agent with the measured.
-        self.predict(timestamp=timestamp)
-        
+    def update_pose2d(self, x : float, y : float, yaw : float, timestamp : float, Q : np.ndarray) -> None:        
         # Projection considers x,y and yaw
         H = np.zeros((3,EKF3D.K_STATE_DIM))
         H[0,0] = 1 # x
@@ -156,9 +173,6 @@ class EKF3D:
         self.timestamp = timestamp
 
     def update_pose(self, xyz : np.ndarray, rpy : np.ndarray, timestamp : float, Q : np.ndarray) -> None:
-        # Performs a prediction for matching the current estimation of the 
-        # agent with the measured.
-        self.predict(timestamp=timestamp)
         
         # Projection considers the first 6 states (x,y,z,r,p,y)
         H = np.eye(6,12)

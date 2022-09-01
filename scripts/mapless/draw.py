@@ -10,11 +10,11 @@ def draw_pose_2d(x : float, y : float, yaw : float, ax : plt.Axes, label : Optio
     ax.scatter([x], [y], marker="x", color="black")
 
     # Draw coordinates system
-    dx = 0.5 * np.cos(yaw)
-    dy = 0.5 * np.sin(yaw)
+    dx = 1.5 * np.cos(yaw)
+    dy = 1.5 * np.sin(yaw)
     ax.arrow( x, y, dx, dy, color="red" )
-    dx = 0.5 * np.cos(yaw + (np.pi / 2) )
-    dy = 0.5 * np.sin(yaw + (np.pi / 2))
+    dx = 1.5 * np.cos(yaw + (np.pi / 2) )
+    dy = 1.5 * np.sin(yaw + (np.pi / 2))
     ax.arrow( x, y, dx, dy, color="green" )
     
     if label is not None:
@@ -31,7 +31,7 @@ def draw_navigable_area(driveable_map : gpd.GeoDataFrame, ax : plt.Axes) -> None
         ])
         bounding_box_gdf = gpd.GeoDataFrame(geometry=gpd.GeoSeries(bounding_box_poly, crs = driveable_map.crs) )
         visible_driveable_map = driveable_map.overlay(bounding_box_gdf, keep_geom_type=True)
-        visible_driveable_map.geometry.plot(ax=ax, alpha=0.5, color="gray")
+        gpd.GeoSeries(visible_driveable_map.geometry.unary_union, crs=driveable_map.crs).plot(ax=ax, alpha=0.7, color="gray")
 
 def draw_traffic_signals(traffic_signals_map : gpd.GeoDataFrame , ax : plt.Axes) -> None:
     x_min, x_max = ax.get_xlim()

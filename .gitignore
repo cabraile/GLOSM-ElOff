@@ -1,5 +1,6 @@
 .vscode/
 .cached/
+results/
 output*
 *.pt
 __pycache__/

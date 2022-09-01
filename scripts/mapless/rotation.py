@@ -6,7 +6,7 @@ def normalize_orientation(orientation_array : np.ndarray) -> np.ndarray:
     normalized = orientation_array
     normalized[ normalized >  np.pi ] -= 2 * np.pi
     normalized[ normalized < -np.pi ] += 2 * np.pi
-    return normalized
+    return normalized.copy()
 
 def build_2d_rotation_matrix(yaw : float) -> np.ndarray:
     return np.array([

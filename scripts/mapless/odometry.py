@@ -78,11 +78,11 @@ class InertialOdometry:
         yaw = self.rpy[2,0]
         draw_pose_2d(x,y,yaw,ax,label="Odometry")
 
-class GPSOdometry:
+class GPSOdometryProvider:
 
     def __init__(self, xyz : np.ndarray, rpy : np.ndarray ) -> None:
-        self.xyz = xyz
-        self.rpy = rpy
+        self.xyz = xyz.reshape(3,1)
+        self.rpy = rpy.reshape(3,1)
     
     def as_transformation_matrix(self) -> np.ndarray:
         R_from_frame_to_world = rotation_matrix_from_euler_angles(*self.rpy.flatten())

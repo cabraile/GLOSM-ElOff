@@ -11,14 +11,16 @@ import utm
 
 import torch
 import rasterio
+import rasterio.plot
 
 import pykitti
 from pykitti.utils import OxtsPacket
 
-from mapless.odometry import GPSOdometry
+from mapless.odometry import GPSOdometryProvider
 from mapless.mcl import MCL
 from mapless.draw import draw_pose_2d, draw_navigable_area, draw_traffic_signals
 from mapless.map_manager import load_map_layers
+from scripts.mapless.ekf import EKF3D
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -80,24 +82,30 @@ def main() -> int:
     T_from_right_camera_to_imu  = T_from_lidar_to_imu @ np.linalg.inv(T_from_lidar_to_camera_right)
 
     # Detection Model
-    model = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True)
+    model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).half()
 
     # Main loop
     print()
     print("Started loop")
     print("======================")
     initial_mean = get_groundtruth_state_as_array(data.oxts[0].packet)
+
     mcl = MCL()
     mcl.set_digital_surface_model_map(dsm_raster)
     mcl.set_driveable_map(layers["driveable_area"])
     mcl.set_traffic_signals_map(layers["traffic_signals"])
     mcl.set_stop_signs_map(layers["stop_signs"])
-    mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([10.0,10.0, 1e-1]),n_particles=100)
+    mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([1.0,1.0, 1e-2]),n_particles=500)
     mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
+    odometry_provider = GPSOdometryProvider(
+        xyz=initial_mean.flatten()[:3] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-1, 1e-1, 1e-2])),
+        rpy=initial_mean.flatten()[3:6] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-4, 1e-4, 1e-4]))
+    )
 
-    odometry = GPSOdometry(
-        xyz=initial_mean.flatten()[:3] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-1, 1e-1, 1e-1])),
-        rpy=initial_mean.flatten()[3:6] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-2, 1e-2, 1e-2]))
+    ekf = EKF3D(
+        current_timestamp = 0.0, 
+        initial_mean = initial_mean,
+        initial_covariance = np.diag([1e-1, 1e-1, 1e-2, 1e-4, 1e-4, 1e-4, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2])
     )
 
     fig, ax = plt.subplots(1,1,figsize=(15,15))
@@ -105,7 +113,7 @@ def main() -> int:
     for seq_idx in range(1,len(data)):
         # Retrieve sequence data
         timestamp = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
-        print(f"Sequence {seq_idx} - timestamp: {timestamp}s")
+        print(f"Sequence ({seq_idx}/{len(data)}) - timestamp: {timestamp}s")
         print("------------------------")
         #lidar_scan  = data.get_velo(seq_idx)
         gps_and_imu_data = data.oxts[seq_idx].packet
@@ -117,11 +125,11 @@ def main() -> int:
         # EKF prediction
         seq_start_time = time.time()
         # TODO: Implement true odometry estimation
-        control_array = odometry.step(
-            xyz=groundtruth_mean.flatten()[:3] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-1, 1e-1, 1e-1])),
-            rpy=groundtruth_mean.flatten()[3:6] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-2, 1e-2, 1e-2]))
+        control_array = odometry_provider.step(
+            xyz=groundtruth_mean.flatten()[:3] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-1, 1e-1, 1e-2])),
+            rpy=groundtruth_mean.flatten()[3:6] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-4, 1e-4, 1e-4]))
         )
-        mcl.predict(control_array[[0,1,5]], np.diag([1e-1,1e-1,1e-2]), z_offset=control_array.flatten()[2],z_variance=1e-2)
+        mcl.predict(control_array[[0,1,5]], np.diag([1e-1,1e-1,1e-4]), z_offset=control_array.flatten()[2],z_variance=1e-2)
         duration = time.time() - seq_start_time
         print(f"Took {1000*duration:.0f}ms for MCL prediction")
 
@@ -131,8 +139,6 @@ def main() -> int:
         detections = detections[detections["confidence"] > 0.7]
         detected_traffic_signal = np.any( detections["name"] == "traffic light" )
         detected_stop_sign = np.any( detections["name"] == "stop sign" )
-        if detected_stop_sign or detected_traffic_signal:
-            model_detection.show()
 
         # MCL Update
         start_time = time.time()
@@ -140,26 +146,46 @@ def main() -> int:
 
         if detected_traffic_signal:
             mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
+ 
+        if seq_idx % 5 == 0:
+            mcl.weigh_eloff()
         duration = time.time() - start_time
         print(f"Took {1000*duration:.0f}ms for MCL update")
- 
-        if seq_idx % 10 == 0.0:
-            print("here")
-            mcl.weigh_eloff()
+
+        ekf.predict(timestamp, cov= np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2]),)
+
+        # EKF Update
+        mcl_pose2d = mcl.get_mean().flatten()
+        mcl_cov2d = mcl.get_covariance()
+        ekf.update_pose2d(
+            x = mcl_pose2d[0],
+            y = mcl_pose2d[1],
+            yaw = mcl_pose2d[2],
+            Q = mcl_cov2d,
+            timestamp = timestamp
+        )
 
         # Draw using the local map
-        if seq_idx % 5 == 0.0:
+        if seq_idx % 1 == 0:
             start_time = time.time()
             x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
+            xyz_est, rpy_est, _, _ = ekf.split_state(ekf.get_state())
+            x_est, y_est = xyz_est.flatten()[:2]
+            yaw_est = rpy_est.flatten()[2]
             ax.cla()
-            draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
-            mcl.plot(ax)
-            odometry.plot(ax)
+            region_size_meters = 80.0
+            ax.set_xlim([x_gt - region_size_meters/2.0, x_gt + region_size_meters/2.0])
+            ax.set_ylim([y_gt - region_size_meters/2.0, y_gt + region_size_meters/2.0])
             cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
             draw_navigable_area(layers["driveable_area"], ax)
+            rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
             draw_traffic_signals(layers["traffic_signals"], ax)
-            #TODO: solve conflicts for displaying output!
-            plt.savefig(f"output/{seq_idx}.png")
+            mcl.plot(ax)
+            draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
+            draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
+            if not os.path.exists(f"results/{args.drive}/"):
+                os.makedirs(f"results/{args.drive}/")
+            plt.savefig(f"results/{args.drive}/{seq_idx:05}.png")
             plt.pause(0.01)
             duration = time.time() - start_time
             print(f"Took {1000*duration:.0f}ms for updating the visualization")

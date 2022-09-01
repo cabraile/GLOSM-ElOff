@@ -8,6 +8,8 @@ from shapely.geometry import Point, Polygon
 import rasterio
 import rasterio.transform
 
+from scipy.stats import circmean
+
 from mapless.rotation import normalize_orientation, build_2d_rotation_matrix, rotation_matrix_from_euler_angles
 from mapless.draw import draw_pose_2d
 
@@ -155,10 +157,27 @@ class MCL:
         dsm_z[mask_in_bounds] = self.dsm_array[particles_row_col_array[mask_in_bounds,0], particles_row_col_array[mask_in_bounds,1]]
         return dsm_z
 
-    def plot(self, ax : plt.Axes) -> None:
-        for i in range(len(self.particles)):
-            x,y, yaw = self.particles[i]
-            draw_pose_2d(x,y,yaw,ax)
+    def plot(self, ax : plt.Axes, draw_poses : bool = False) -> None:
+        if draw_poses:
+            for i in range(len(self.particles)):
+                x,y, yaw = self.particles[i]
+                draw_pose_2d(x,y,yaw,ax)
+        else:
+            ax.scatter(self.particles[:,0], self.particles[:,1], c="orange", marker="x")
+        
+    def get_mean(self) -> np.ndarray:
+        """Returns the (x,y,yaw) array of the particles' mean."""
+        x_mean, y_mean = np.average(self.particles[:,:2], axis=0).flatten()
+        yaw_mean = circmean(self.particles[:,2], high=np.pi, low = -np.pi,)
+        return np.array([ x_mean, y_mean, yaw_mean ])
+
+    def get_covariance(self) -> np.ndarray:
+        """Returns the covariance array of the variables x,y and yaw."""
+        # TODO: the covariance returned does not consider the circular nature 
+        # of the yaw
+        covariance = np.cov(self.particles.T)
+
+        return covariance
 
     # Data flow
     # =========================================================================
@@ -276,6 +295,12 @@ class MCL:
 
     def weigh_eloff(self) -> None:
         valid_particles_mask = ~np.isnan(self.eloff_particles_z_accumulator)
+        if np.sum(valid_particles_mask) / len(self.particles) <= 0.1:
+            self.eloff_global_z_accumulator = 0.0
+            self.eloff_global_z_variance = 0.0
+            self.eloff_particles_z_accumulator = np.zeros((len(self.particles)))
+            return
+
         weights = np.zeros((len(self.particles)))
         delta_z_mean = self.eloff_global_z_accumulator
         delta_z_stddev = self.eloff_global_z_variance ** 0.5
@@ -285,6 +310,9 @@ class MCL:
 
         sum_w = np.sum(weights)
         if sum_w <= 1e-10:
+            self.eloff_global_z_accumulator = 0.0
+            self.eloff_global_z_variance = 0.0
+            self.eloff_particles_z_accumulator = np.zeros((len(self.particles)))
             return
         weights_norm = weights / np.sum(sum_w)
 
@@ -294,15 +322,6 @@ class MCL:
         # Reset acummulators
         self.eloff_global_z_accumulator = 0.0
         self.eloff_global_z_variance = 0.0
-        self.eloff_particles_z_accumulator = np.zeros((self.particles))
+        self.eloff_particles_z_accumulator = np.zeros((len(self.particles)))
 
     # =========================================================================
-
-if __name__ == "__main__":
-    particle_filter = MCL()
-    particle_filter.sample( mean = np.array([0., 0., 0.]), covariance = np.diag([1e-1, 1e-1, 1e-1]), n_particles = 3 )
-    for i in range(10):
-        fig, ax = plt.subplots(1,1,figsize=(15,15))
-        particle_filter.plot(ax)
-        plt.show()
-        particle_filter.predict( np.array([1.0, 0.0, np.pi/2]), np.diag([1e-18, 1e-18, 1e-28]) )
