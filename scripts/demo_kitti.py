@@ -16,11 +16,11 @@ import rasterio.plot
 import pykitti
 from pykitti.utils import OxtsPacket
 
-from mapless.odometry import GPSOdometryProvider
-from mapless.mcl import MCL
-from mapless.draw import draw_pose_2d, draw_navigable_area, draw_traffic_signals
-from mapless.map_manager import load_map_layers
-from scripts.mapless.ekf import EKF3D
+from glosm.odometry import GPSOdometryProvider
+from glosm.mcl import MCL
+from glosm.draw import draw_pose_2d, draw_navigable_area, draw_traffic_signals
+from glosm.map_manager import load_map_layers
+from scripts.glosm.ekf import EKF3D
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -179,19 +179,22 @@ def main() -> int:
             cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
             draw_navigable_area(layers["driveable_area"], ax)
             rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
-            draw_traffic_signals(layers["traffic_signals"], ax)
             mcl.plot(ax)
             draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
             draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
+            draw_traffic_signals(layers["traffic_signals"], ax)
             if not os.path.exists(f"results/{args.drive}/"):
                 os.makedirs(f"results/{args.drive}/")
             plt.savefig(f"results/{args.drive}/{seq_idx:05}.png")
-            plt.pause(0.01)
             duration = time.time() - start_time
             print(f"Took {1000*duration:.0f}ms for updating the visualization")
 
         print(f"Complete pipeline in the sequence took {time.time()-seq_start_time:.2f}s")
-    plt.show()
+    
+    print("-----------\n")
+    print("Exporting video to `results/`")
+    os.system(f"ffmpeg -framerate 10 -pattern_type glob -i 'results/{args.drive}/*.png' results/{args.drive}.mp4")
+
     return 0
 
 if __name__=="__main__":

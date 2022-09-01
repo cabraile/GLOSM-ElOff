@@ -44,4 +44,8 @@ def draw_traffic_signals(traffic_signals_map : gpd.GeoDataFrame , ax : plt.Axes)
     ])
     bounding_box_gdf = gpd.GeoDataFrame(geometry=gpd.GeoSeries(bounding_box_poly, crs = traffic_signals_map.crs) )
     visible_traffic_signals_map = traffic_signals_map.overlay(bounding_box_gdf, keep_geom_type=True)
-    visible_traffic_signals_map.geometry.plot(ax=ax, alpha=0.5, color="gray")
+    visible_traffic_signals_map.buffer(0.8).geometry.plot(ax=ax, alpha=1.0, color="red")
+    for _, traffic_signal_row in visible_traffic_signals_map.iterrows():
+        easting = traffic_signal_row.geometry.x
+        northing = traffic_signal_row.geometry.y
+        ax.text(easting, northing, s="Traffic Signal")

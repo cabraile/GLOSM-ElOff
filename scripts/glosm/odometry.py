@@ -4,8 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
 
-from mapless.rotation import rotation_matrix_from_euler_angles
-from mapless.draw import draw_pose_2d
+from glosm.rotation import rotation_matrix_from_euler_angles
+from glosm.draw import draw_pose_2d
 
 class InertialOdometry:
 

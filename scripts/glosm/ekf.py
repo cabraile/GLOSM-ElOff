@@ -2,7 +2,7 @@ from datetime import timedelta
 from typing import Optional, Tuple
 import numpy as np
 
-from mapless.rotation import normalize_angle, rotation_matrix_from_euler_angles, partial_rotation_matrix
+from glosm.rotation import normalize_angle, rotation_matrix_from_euler_angles, partial_rotation_matrix
 from scipy.spatial.transform import Rotation
 
 class EKF3D:
