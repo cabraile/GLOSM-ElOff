@@ -97,25 +97,27 @@ class EKF3D:
         self.mean = np.vstack((position, orientation, velocity, angular_velocity))
         self.timestamp = timestamp
 
-    # def predict_pose3d(self, delta_xyz : np.ndarray, delta_rpy : np.ndarray , cov : np.ndarray) -> None:
-    #     delta_roll, delta_pitch, delta_yaw = delta_rpy.flatten()
-    #     R_from_current_to_prev = rotation_matrix_from_euler_angles(roll = delta_roll, pitch = delta_pitch, yaw = delta_yaw)
-    #     T_from_current_to_prev = np.eye(4)
-    #     T_from_current_to_prev[:3,:3] = R_from_current_to_prev
-    #     T_from_current_to_prev[:3, 3] = delta_xyz.flatten()
+    def predict_pose3d(self, delta_xyz : np.ndarray, delta_rpy : np.ndarray , cov : np.ndarray) -> None:
+        delta_roll, delta_pitch, delta_yaw = delta_rpy.flatten()
+        R_from_current_to_prev = rotation_matrix_from_euler_angles(roll = delta_roll, pitch = delta_pitch, yaw = delta_yaw)
+        T_from_current_to_prev = np.eye(4)
+        T_from_current_to_prev[:3,:3] = R_from_current_to_prev
+        T_from_current_to_prev[:3, 3] = delta_xyz.flatten()
 
-    #     xyz, rpy, _, _ = self.split_state(self.mean)
-    #     T_from_prev_to_world = np.eye(4)
-    #     T_from_prev_to_world[:3,:3] = rotation_matrix_from_euler_angles(rpy[0], rpy[1], rpy[2])
-    #     T_from_prev_to_world[:3, 3] = xyz.flatten()
+        xyz, rpy, _, _ = self.split_state(self.mean)
+        T_from_prev_to_world = np.eye(4)
+        T_from_prev_to_world[:3,:3] = rotation_matrix_from_euler_angles(rpy[0,0], rpy[1,0], rpy[2,0])
+        T_from_prev_to_world[:3, 3] = xyz.flatten()
         
-    #     T_from_current_to_world = T_from_prev_to_world @ T_from_current_to_prev
+        T_from_current_to_world = T_from_prev_to_world @ T_from_current_to_prev
 
-    #     # TODO: probably something is wrong, double check later
-    #     self.xyz = T_from_current_to_world[:3, 3].reshape(3,1)
-    #     R_from_current_to_world = T_from_current_to_world[:3,:3]
-    #     self.rpy = Rotation.from_matrix(R_from_current_to_world).as_euler("xyz", degrees=False).reshape(3,1)
-    #     self.covariance += cov
+        self.xyz = T_from_current_to_world[:3, 3].reshape(3,1)
+        R_from_current_to_world = T_from_current_to_world[:3,:3]
+        self.rpy = Rotation.from_matrix(R_from_current_to_world).as_euler("xyz", degrees=False).reshape(3,1)
+        
+        # TODO: DID NOT ACCOUNT FOR THE UNCERTAINTY RELATED TO THE NON-LINEARITY!
+        # TODO: COMPUTE JACOBIANS
+        self.covariance += cov
         
     def update_imu_orientation(self, orientation_angles_rpy : np.ndarray, angular_velocity_rpy : np.ndarray , timestamp : float, Q : np.ndarray) -> None:
         """

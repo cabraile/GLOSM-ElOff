@@ -1,3 +1,4 @@
+# 3rd party packages
 import os
 import sys
 import time
@@ -5,6 +6,7 @@ import argparse
 
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 import contextily as cx
 import utm
@@ -16,6 +18,15 @@ import rasterio.plot
 import pykitti
 from pykitti.utils import OxtsPacket
 
+# Importing GLOSM
+MODULES_PATH =os.path.realpath( 
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), # root/scripts/demos/kitti/
+        os.path.pardir, # root/scripts/demos/
+        os.path.pardir  # root/scripts/
+    )
+)
+sys.path.append(MODULES_PATH)
 from glosm.odometry import GPSOdometryProvider
 from glosm.mcl import MCL
 from glosm.draw import draw_pose_2d, draw_navigable_area, draw_traffic_signals
@@ -102,7 +113,12 @@ def main() -> int:
         rpy=initial_mean.flatten()[3:6] + np.random.multivariate_normal([0.,0.,0.], cov=np.diag([1e-4, 1e-4, 1e-4]))
     )
 
-    ekf = EKF3D(
+    ekf_corrected = EKF3D(
+        current_timestamp = 0.0, 
+        initial_mean = initial_mean,
+        initial_covariance = np.diag([1e-1, 1e-1, 1e-2, 1e-4, 1e-4, 1e-4, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2])
+    )
+    ekf_uncorrected = EKF3D(
         current_timestamp = 0.0, 
         initial_mean = initial_mean,
         initial_covariance = np.diag([1e-1, 1e-1, 1e-2, 1e-4, 1e-4, 1e-4, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2])
@@ -110,10 +126,16 @@ def main() -> int:
 
     fig, ax = plt.subplots(1,1,figsize=(15,15))
 
+    # Stores results for exporting as CSV
+    estimated_trajectory = []
+    uncorrected_trajectory = []
+    groundtruth_trajectory = []
+
     for seq_idx in range(1,len(data)):
+
         # Retrieve sequence data
-        timestamp = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
-        print(f"Sequence ({seq_idx}/{len(data)}) - timestamp: {timestamp}s")
+        elapsed_time = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
+        print(f"Sequence ({seq_idx}/{len(data)}) - elapsed time: {elapsed_time}s")
         print("------------------------")
         #lidar_scan  = data.get_velo(seq_idx)
         gps_and_imu_data = data.oxts[seq_idx].packet
@@ -152,42 +174,66 @@ def main() -> int:
         duration = time.time() - start_time
         print(f"Took {1000*duration:.0f}ms for MCL update")
 
-        ekf.predict(timestamp, cov= np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2]),)
+        ekf_corrected.predict(elapsed_time, cov= np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2]),)
+        ekf_uncorrected.predict(elapsed_time, cov= np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2]))
+        ekf_corrected.predict_pose3d(
+            delta_xyz=control_array.flatten()[:3],
+            delta_rpy=control_array.flatten()[3:],
+            cov = np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2])
+        )
+        ekf_uncorrected.predict_pose3d(
+            delta_xyz=control_array.flatten()[:3],
+            delta_rpy=control_array.flatten()[3:],
+            cov = np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2])
+        )
 
         # EKF Update
         mcl_pose2d = mcl.get_mean().flatten()
         mcl_cov2d = mcl.get_covariance()
-        ekf.update_pose2d(
+        ekf_corrected.update_pose2d(
             x = mcl_pose2d[0],
             y = mcl_pose2d[1],
             yaw = mcl_pose2d[2],
             Q = mcl_cov2d,
-            timestamp = timestamp
+            timestamp = elapsed_time
         )
 
+        # Store trajectory
+        x,y,z = groundtruth_mean.flatten()[:3]
+        groundtruth_trajectory.append({
+            "elapsed_time" : elapsed_time, "x" : x, "y" : y, "z" : z
+        })
+        x,y,z = ekf_corrected.get_state().flatten()[:3]
+        estimated_trajectory.append({
+            "elapsed_time" : elapsed_time, "x" : x, "y" : y, "z" : z
+        })
+        x,y,z = ekf_uncorrected.get_state().flatten()[:3]
+        uncorrected_trajectory.append({
+            "elapsed_time" : elapsed_time, "x" : x, "y" : y, "z" : z
+        })
+
         # Draw using the local map
-        if seq_idx % 1 == 0:
-            start_time = time.time()
-            x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
-            xyz_est, rpy_est, _, _ = ekf.split_state(ekf.get_state())
-            x_est, y_est = xyz_est.flatten()[:2]
-            yaw_est = rpy_est.flatten()[2]
-            ax.cla()
-            region_size_meters = 80.0
-            ax.set_xlim([x_gt - region_size_meters/2.0, x_gt + region_size_meters/2.0])
-            ax.set_ylim([y_gt - region_size_meters/2.0, y_gt + region_size_meters/2.0])
-            cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
-            draw_navigable_area(layers["driveable_area"], ax)
-            rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
-            mcl.plot(ax)
-            draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
-            draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
-            draw_traffic_signals(layers["traffic_signals"], ax)
-            if not os.path.exists(f"results/{args.drive}/"):
-                os.makedirs(f"results/{args.drive}/")
-            plt.savefig(f"results/{args.drive}/{seq_idx:05}.png")
-            duration = time.time() - start_time
-            print(f"Took {1000*duration:.0f}ms for updating the visualization")
+        start_time = time.time()
+        x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
+        xyz_est, rpy_est, _, _ = ekf_corrected.split_state(ekf_corrected.get_state())
+        x_est, y_est = xyz_est.flatten()[:2]
+        yaw_est = rpy_est.flatten()[2]
+        ax.cla()
+        region_size_meters = 80.0
+        ax.set_xlim([x_gt - region_size_meters/2.0, x_gt + region_size_meters/2.0])
+        ax.set_ylim([y_gt - region_size_meters/2.0, y_gt + region_size_meters/2.0])
+        cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
+        draw_navigable_area(layers["driveable_area"], ax)
+        rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
+        mcl.plot(ax)
+        draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
+        draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
+        draw_traffic_signals(layers["traffic_signals"], ax)
+        if not os.path.exists(f"results/{args.drive}/"):
+            os.makedirs(f"results/{args.drive}/")
+        plt.savefig(f"results/{args.drive}/{seq_idx:05}.png")
+        duration = time.time() - start_time
+        print(f"Took {1000*duration:.0f}ms for updating the visualization")
 
         print(f"Complete pipeline in the sequence took {time.time()-seq_start_time:.2f}s")
     
@@ -195,6 +241,11 @@ def main() -> int:
     print("Exporting video to `results/`")
     os.system(f"ffmpeg -framerate 10 -pattern_type glob -i 'results/{args.drive}/*.png' results/{args.drive}.mp4")
 
+    print("-----------\n")
+    print("Exporting trajectories to `results/`")
+    pd.DataFrame(groundtruth_trajectory).to_csv(f"results/{args.drive}_groundtruth_trajectory.csv",index=False)
+    pd.DataFrame(estimated_trajectory).to_csv(f"results/{args.drive}_estimated_trajectory.csv",index=False)
+    pd.DataFrame(uncorrected_trajectory).to_csv(f"results/{args.drive}_uncorrected_trajectory.csv",index=False)
     return 0
 
 if __name__=="__main__":
