@@ -50,7 +50,7 @@ def main() -> int:
     print("> Drawing the trajectories")
     fig, ax = plt.subplots(1,1,figsize=(15,15))
     for trajectory_name, trajectory_df in tqdm.tqdm(trajectories.items()):
-        trajectory_df.plot(ax=ax, x="x", y="y", color=trajectories_colors[trajectory_name], label=trajectory_name, linewidth=7.0)
+        trajectory_df.plot(ax=ax, x="easting", y="northing", color=trajectories_colors[trajectory_name], label=trajectory_name, linewidth=7.0)
     cx.add_basemap(ax, crs=crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
     plt.savefig(f"results/trajectories.png")
 
@@ -70,8 +70,8 @@ def main() -> int:
             reference_row = reference_df.iloc[closest_reference_idx]
 
             # Compute euclidean distance between reference and estimation
-            estimation_xy = np.array( estimation_row[["x","y"]] )
-            reference_xy = np.array( reference_row[["x", "y"]] )
+            estimation_xy = np.array( estimation_row[["easting","northing"]] )
+            reference_xy = np.array( reference_row[["easting", "northing"]] )
             distance = np.linalg.norm( estimation_xy - reference_xy )
             error_list.append(distance)
 

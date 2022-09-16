@@ -92,6 +92,10 @@ def main() -> int:
     T_from_left_camera_to_imu   = T_from_lidar_to_imu @ np.linalg.inv(T_from_lidar_to_camera_left)
     T_from_right_camera_to_imu  = T_from_lidar_to_imu @ np.linalg.inv(T_from_lidar_to_camera_right)
 
+    # TODO: Use cam0 as reference - comparison with the odometry methods
+    # T_from_lidar_to_base_link = data.calib.T_cam0_velo
+    # T_from_imu_to_base_link = T_from_lidar_to_base_link @ T_from_imu_to_lidar
+
     # Detection Model
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).half()
 
@@ -199,41 +203,45 @@ def main() -> int:
         )
 
         # Store trajectory
-        x,y,z = groundtruth_mean.flatten()[:3]
+        easting,northing,elevation = groundtruth_mean.flatten()[:3]
+        x,y,z = groundtruth_mean.flatten()[:3] - initial_mean.flatten()[:3]
         groundtruth_trajectory.append({
-            "elapsed_time" : elapsed_time, "x" : x, "y" : y, "z" : z
+            "elapsed_time" : elapsed_time, "easting" : easting, "northing" : northing, "elevation" : elevation,  "x" : x, "y" : y, "z" : z
         })
-        x,y,z = ekf_corrected.get_state().flatten()[:3]
+        easting,northing,elevation = ekf_corrected.get_state().flatten()[:3]
+        x,y,z = ekf_corrected.get_state().flatten()[:3] - initial_mean.flatten()[:3]
         estimated_trajectory.append({
-            "elapsed_time" : elapsed_time, "x" : x, "y" : y, "z" : z
+            "elapsed_time" : elapsed_time, "easting" : easting, "northing" : northing, "elevation" : elevation,  "x" : x, "y" : y, "z" : z
         })
-        x,y,z = ekf_uncorrected.get_state().flatten()[:3]
+        easting,northing,elevation = ekf_uncorrected.get_state().flatten()[:3]
+        x,y,z = ekf_uncorrected.get_state().flatten()[:3] - initial_mean.flatten()[:3]
         uncorrected_trajectory.append({
-            "elapsed_time" : elapsed_time, "x" : x, "y" : y, "z" : z
+            "elapsed_time" : elapsed_time, "easting" : easting, "northing" : northing, "elevation" : elevation,  "x" : x, "y" : y, "z" : z
         })
 
         # Draw using the local map
-        start_time = time.time()
-        x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
-        xyz_est, rpy_est, _, _ = ekf_corrected.split_state(ekf_corrected.get_state())
-        x_est, y_est = xyz_est.flatten()[:2]
-        yaw_est = rpy_est.flatten()[2]
-        ax.cla()
-        region_size_meters = 80.0
-        ax.set_xlim([x_gt - region_size_meters/2.0, x_gt + region_size_meters/2.0])
-        ax.set_ylim([y_gt - region_size_meters/2.0, y_gt + region_size_meters/2.0])
-        cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
-        draw_navigable_area(layers["driveable_area"], ax)
-        rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
-        mcl.plot(ax)
-        draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
-        draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
-        draw_traffic_signals(layers["traffic_signals"], ax)
-        if not os.path.exists(f"results/{args.drive}/"):
-            os.makedirs(f"results/{args.drive}/")
-        plt.savefig(f"results/{args.drive}/{seq_idx:05}.png")
-        duration = time.time() - start_time
-        print(f"Took {1000*duration:.0f}ms for updating the visualization")
+        if seq_idx % 10 == 0:
+            start_time = time.time()
+            x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
+            xyz_est, rpy_est, _, _ = ekf_corrected.split_state(ekf_corrected.get_state())
+            x_est, y_est = xyz_est.flatten()[:2]
+            yaw_est = rpy_est.flatten()[2]
+            ax.cla()
+            region_size_meters = 80.0
+            ax.set_xlim([x_gt - region_size_meters/2.0, x_gt + region_size_meters/2.0])
+            ax.set_ylim([y_gt - region_size_meters/2.0, y_gt + region_size_meters/2.0])
+            cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
+            draw_navigable_area(layers["driveable_area"], ax)
+            rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
+            mcl.plot(ax)
+            draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
+            draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
+            draw_traffic_signals(layers["traffic_signals"], ax)
+            if not os.path.exists(f"results/{args.drive}/"):
+                os.makedirs(f"results/{args.drive}/")
+            plt.savefig(f"results/{args.drive}/{seq_idx:05}.png")
+            duration = time.time() - start_time
+            print(f"Took {1000*duration:.0f}ms for updating the visualization")
 
         print(f"Complete pipeline in the sequence took {time.time()-seq_start_time:.2f}s")
     

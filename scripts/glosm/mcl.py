@@ -10,7 +10,7 @@ import rasterio.transform
 
 from scipy.stats import circmean
 
-from glosm.rotation import normalize_orientation, build_2d_rotation_matrix, rotation_matrix_from_euler_angles
+from glosm.rotation import normalize_orientation, build_2d_rotation_matrix
 from glosm.draw import draw_pose_2d
 
 def low_variance_sampler(weights : np.ndarray) -> np.ndarray:
