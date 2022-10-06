@@ -234,7 +234,7 @@ def main() -> int:
     os.system(f"ffmpeg -framerate 10 -pattern_type glob -i 'results/{output_prefix}/frames/*.png' results/{output_prefix}/{output_prefix}.mp4")
 
     print("-----------\n")
-    print("Exporting trajectories to `results/{output_prefix}`")
+    print(f"Exporting trajectories to `results/{output_prefix}`")
     pd.DataFrame(groundtruth_trajectory).to_csv(f"results/{output_prefix}/groundtruth_trajectory.csv",index=False)
     pd.DataFrame(estimated_trajectory).to_csv(f"results/{output_prefix}/estimated_trajectory.csv",index=False)
     return 0
