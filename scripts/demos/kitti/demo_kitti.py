@@ -31,7 +31,7 @@ from glosm.odometry import GPSOdometryProvider
 from glosm.mcl import MCL
 from glosm.draw import draw_pose_2d, draw_navigable_area, draw_traffic_signals
 from glosm.map_manager import load_map_layers
-from scripts.glosm.ekf import EKF3D
+from glosm.ekf import EKF3D
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -66,6 +66,7 @@ def get_groundtruth_state_as_array( seq_data : OxtsPacket) -> np.ndarray:
 
 def main() -> int:
     args = parse_args()
+    output_prefix = f"{args.date}_drive_{args.drive}_sync"
 
     # Map elements
     print("Loading DSM")
@@ -122,17 +123,11 @@ def main() -> int:
         initial_mean = initial_mean,
         initial_covariance = np.diag([1e-1, 1e-1, 1e-2, 1e-4, 1e-4, 1e-4, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2])
     )
-    ekf_uncorrected = EKF3D(
-        current_timestamp = 0.0, 
-        initial_mean = initial_mean,
-        initial_covariance = np.diag([1e-1, 1e-1, 1e-2, 1e-4, 1e-4, 1e-4, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2])
-    )
 
     fig, ax = plt.subplots(1,1,figsize=(15,15))
 
     # Stores results for exporting as CSV
     estimated_trajectory = []
-    uncorrected_trajectory = []
     groundtruth_trajectory = []
 
     for seq_idx in range(1,len(data)):
@@ -179,13 +174,7 @@ def main() -> int:
         print(f"Took {1000*duration:.0f}ms for MCL update")
 
         ekf_corrected.predict(elapsed_time, cov= np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2]),)
-        ekf_uncorrected.predict(elapsed_time, cov= np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2]))
         ekf_corrected.predict_pose3d(
-            delta_xyz=control_array.flatten()[:3],
-            delta_rpy=control_array.flatten()[3:],
-            cov = np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2])
-        )
-        ekf_uncorrected.predict_pose3d(
             delta_xyz=control_array.flatten()[:3],
             delta_rpy=control_array.flatten()[3:],
             cov = np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2])
@@ -213,14 +202,9 @@ def main() -> int:
         estimated_trajectory.append({
             "elapsed_time" : elapsed_time, "easting" : easting, "northing" : northing, "elevation" : elevation,  "x" : x, "y" : y, "z" : z
         })
-        easting,northing,elevation = ekf_uncorrected.get_state().flatten()[:3]
-        x,y,z = ekf_uncorrected.get_state().flatten()[:3] - initial_mean.flatten()[:3]
-        uncorrected_trajectory.append({
-            "elapsed_time" : elapsed_time, "easting" : easting, "northing" : northing, "elevation" : elevation,  "x" : x, "y" : y, "z" : z
-        })
 
         # Draw using the local map
-        if seq_idx % 10 == 0:
+        if seq_idx % 5 == 0:
             start_time = time.time()
             x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
             xyz_est, rpy_est, _, _ = ekf_corrected.split_state(ekf_corrected.get_state())
@@ -237,23 +221,22 @@ def main() -> int:
             draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
             draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
             draw_traffic_signals(layers["traffic_signals"], ax)
-            if not os.path.exists(f"results/{args.drive}/"):
-                os.makedirs(f"results/{args.drive}/")
-            plt.savefig(f"results/{args.drive}/{seq_idx:05}.png")
+            if not os.path.exists(f"results/{output_prefix}/frames"):
+                os.makedirs(f"results/{output_prefix}/frames")
+            plt.savefig(f"results/{output_prefix}/frames/{seq_idx:05}.png")
             duration = time.time() - start_time
             print(f"Took {1000*duration:.0f}ms for updating the visualization")
-
+        
         print(f"Complete pipeline in the sequence took {time.time()-seq_start_time:.2f}s")
     
     print("-----------\n")
     print("Exporting video to `results/`")
-    os.system(f"ffmpeg -framerate 10 -pattern_type glob -i 'results/{args.drive}/*.png' results/{args.drive}.mp4")
+    os.system(f"ffmpeg -framerate 10 -pattern_type glob -i 'results/{output_prefix}/frames/*.png' results/{output_prefix}/{output_prefix}.mp4")
 
     print("-----------\n")
-    print("Exporting trajectories to `results/`")
-    pd.DataFrame(groundtruth_trajectory).to_csv(f"results/{args.drive}_groundtruth_trajectory.csv",index=False)
-    pd.DataFrame(estimated_trajectory).to_csv(f"results/{args.drive}_estimated_trajectory.csv",index=False)
-    pd.DataFrame(uncorrected_trajectory).to_csv(f"results/{args.drive}_uncorrected_trajectory.csv",index=False)
+    print("Exporting trajectories to `results/{output_prefix}`")
+    pd.DataFrame(groundtruth_trajectory).to_csv(f"results/{output_prefix}/groundtruth_trajectory.csv",index=False)
+    pd.DataFrame(estimated_trajectory).to_csv(f"results/{output_prefix}/estimated_trajectory.csv",index=False)
     return 0
 
 if __name__=="__main__":
