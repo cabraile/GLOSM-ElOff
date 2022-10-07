@@ -133,14 +133,15 @@ def main() -> int:
     mcl.set_driveable_map(layers["driveable_area"])
     mcl.set_traffic_signals_map(layers["traffic_signals"])
     mcl.set_stop_signs_map(layers["stop_signs"])
-    mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([1.0,1.0, 1e-2]),n_particles=100)
+    mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([1.0,1.0, 1e-2]),n_particles=200)
     mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
     odometry_provider = LaserOdometry(voxel_size=0.25, distance_threshold=5.0)
-
+    
+    initial_mean[6:] = 0.0
     ekf_corrected = EKF3D(
         current_timestamp = 0.0, 
         initial_mean = initial_mean,
-        initial_covariance = np.diag([1e-1, 1e-1, 1e-2, 1e-4, 1e-4, 1e-4, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2])
+        initial_covariance = np.diag([1., 1., 1., 1e-2, 1e-2, 1e-2, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2])
     )
 
     fig, ax = plt.subplots(1,1,figsize=(15,15))
@@ -190,7 +191,7 @@ def main() -> int:
         position_var = position_std ** 2.0
 
         # Compute orientation-related variance
-        error_per_rad = 0.05
+        error_per_rad = 0.10
         orientation_std = ( (1+error_per_rad) * np.abs(pose_offset_dict["yaw"]))/3.0
         orientation_var = orientation_std ** 2.0
 
@@ -198,19 +199,18 @@ def main() -> int:
             control_array[[0,1,5]], 
             np.diag([position_var,position_var,orientation_var]), 
             z_offset=control_array.flatten()[2],
-            z_variance=1e-2
+            z_variance=1e-4
         )
         duration = time.time() - seq_start_time
         print(f"Took {1000*duration:.0f}ms for MCL prediction")
         
         # EKF prediction
-        #ekf_corrected.predict(elapsed_time, cov= np.diag([1e-1,1e-1,1e-1,1e-2,1e-2,1e-2,1e-1,1e-1,1e-1,1e-2,1e-2,1e-2]),)
         ekf_corrected.predict_pose3d(
             delta_xyz=control_array.flatten()[:3],
             delta_rpy=control_array.flatten()[3:],
             cov = np.diag([
-                position_var,position_var,position_var,
-                orientation_var,orientation_var,orientation_var,
+                1e0,1e0,1e0,
+                1e-1,1e-1,1e-1,
                 1e-1,1e-1,1e-1,
                 1e-2,1e-2,1e-2
             ])
@@ -226,15 +226,12 @@ def main() -> int:
         # MCL Update
         start_time = time.time()
 
-        # Weigh Eloff based on the number of iterations
+        mcl.weigh_in_driveable_area()
+        if detected_traffic_signal:
+            mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
         if seq_idx % 5 == 0:
             mcl.weigh_eloff()
 
-        mcl.weigh_in_driveable_area()
-
-        if detected_traffic_signal:
-            mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
- 
         duration = time.time() - start_time
         print(f"Took {1000*duration:.0f}ms for MCL update")
 
@@ -262,7 +259,7 @@ def main() -> int:
         })
 
         # Draw using the local map
-        if seq_idx % 7 == 0 or seq_idx == 1:
+        if seq_idx % 7 == 0:
             start_time = time.time()
             x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
             xyz_est, rpy_est, _, _ = ekf_corrected.split_state(ekf_corrected.get_state())
