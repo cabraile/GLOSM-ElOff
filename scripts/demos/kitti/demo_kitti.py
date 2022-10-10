@@ -33,7 +33,6 @@ MODULES_PATH =os.path.realpath(
 )
 sys.path.append(MODULES_PATH)
 
-from glosm.odometry     import GPSOdometryProvider as GPSOdometry
 from glosm.mcl          import MCL
 from glosm.draw         import draw_pose_2d, draw_navigable_area, draw_traffic_signals
 from glosm.map_manager  import load_map_layers
@@ -90,6 +89,8 @@ def main() -> int:
     args = parse_args()
     output_prefix = f"{args.date}_drive_{args.drive}_sync"
 
+    random_state = np.random.RandomState(np.random.MT19937(np.random.SeedSequence(123456789)))
+
     # Map elements
     print("Loading DSM")
     print("======================")
@@ -123,20 +124,19 @@ def main() -> int:
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).half()
 
     # Main loop
-    print()
-    print("Started loop")
-    print("======================")
     initial_mean = get_groundtruth_state_as_array(data.oxts[0].packet)
 
+    # Start estimation modules
     mcl = MCL()
     mcl.set_digital_surface_model_map(dsm_raster)
     mcl.set_driveable_map(layers["driveable_area"])
     mcl.set_traffic_signals_map(layers["traffic_signals"])
     mcl.set_stop_signs_map(layers["stop_signs"])
-    mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([1.0,1.0, 1e-2]),n_particles=200)
+    mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([1.0,1.0, 1e-2]),n_particles=500)
     mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
-    odometry_provider = LaserOdometry(voxel_size=0.25, distance_threshold=5.0)
-    
+
+    laser_odometry = LaserOdometry(voxel_size=0.25, distance_threshold=3.5, frequency=10.0)
+
     initial_mean[6:] = 0.0
     ekf_corrected = EKF3D(
         current_timestamp = 0.0, 
@@ -150,56 +150,71 @@ def main() -> int:
     estimated_trajectory = []
     groundtruth_trajectory = []
 
+    print()
+    print("Started loop")
+    print("======================")
     for seq_idx in range(0,len(data)):
+
+        # LOAD DATA
+        # =========================================================
 
         # Retrieve sequence data
         elapsed_time = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
         print(f"Sequence ({seq_idx}/{len(data)}) - elapsed time: {elapsed_time}s")
         print("------------------------")
-        
+
         # Load input data
         gps_and_imu_data = data.oxts[seq_idx].packet
         rgb_right, rgb_left = data.get_rgb(seq_idx) # right = cam2, left = cam3
         rgb_left = np.array(rgb_left)
         rgb_right = np.array(rgb_right)
         groundtruth_mean = get_groundtruth_state_as_array(gps_and_imu_data)
+        acceleration_imu = [ data.oxts[seq_idx].packet.af, data.oxts[seq_idx].packet.al, data.oxts[seq_idx].packet.au ]
+        angular_velocity_imu = [ data.oxts[seq_idx].packet.wf, data.oxts[seq_idx].packet.wl, data.oxts[seq_idx].packet.wu ]
         lidar_scan  = data.get_velo(seq_idx)
 
         # Filter laser scan points
         scan_points_distances = np.linalg.norm(lidar_scan[:,:3],axis=1) 
-        keep_points_mask = (scan_points_distances < 40.0) & (scan_points_distances > 2.0)
+        keep_points_mask = (scan_points_distances < 60.0) & (scan_points_distances > 2.0)
         lidar_scan = lidar_scan[keep_points_mask,:]
+
+        # LASER ODOMETRY
+        # =========================================================
 
         # To Point Cloud
         lidar_pcd = scan_array_to_pointcloud(lidar_scan)
 
         # Odometry estimation
         seq_start_time = time.time()
-        T_from_lidar_curr_to_lidar_prev = odometry_provider.register(lidar_pcd)
+        T_from_lidar_curr_to_lidar_prev = laser_odometry.register(lidar_pcd)
         T_from_imu_curr_to_imu_prev = T_from_lidar_to_imu @ T_from_lidar_curr_to_lidar_prev @ T_from_imu_to_lidar
         pose_offset_dict = split_transform(T_from_imu_curr_to_imu_prev)
+
         duration = time.time() - seq_start_time
         print(f"Took {1000*duration:.0f}ms for registering scan")        
+
+        # PREDICTION
+        # =========================================================
 
         seq_start_time = time.time()
         control_array = np.array([ pose_offset_dict[k] for k in ["x", "y", "z", "roll", "pitch", "yaw"] ])
         
         # Compute position-related variance
-        error_per_meter = 0.15
+        error_per_meter = 0.8
         position_displacement = (pose_offset_dict["x"] ** 2.0 + pose_offset_dict["y"] ** 2.0) ** 0.5
-        position_std = ( (1+error_per_meter) * position_displacement)/3.0 # ~3 stddev
+        position_std = ( error_per_meter * position_displacement)/3.0 # ~3 stddev
         position_var = position_std ** 2.0
 
         # Compute orientation-related variance
-        error_per_rad = 0.10
-        orientation_std = ( (1+error_per_rad) * np.abs(pose_offset_dict["yaw"]))/3.0
+        error_per_rad = 0.3
+        orientation_std = ( error_per_rad * np.abs(pose_offset_dict["yaw"]))/3.0
         orientation_var = orientation_std ** 2.0
 
         mcl.predict(
             control_array[[0,1,5]], 
             np.diag([position_var,position_var,orientation_var]), 
             z_offset=control_array.flatten()[2],
-            z_variance=1e-4
+            z_variance=1e-1
         )
         duration = time.time() - seq_start_time
         print(f"Took {1000*duration:.0f}ms for MCL prediction")
@@ -209,13 +224,16 @@ def main() -> int:
             delta_xyz=control_array.flatten()[:3],
             delta_rpy=control_array.flatten()[3:],
             cov = np.diag([
-                1e0,1e0,1e0,
+                2e0,2e0,2e0,
                 1e-1,1e-1,1e-1,
                 1e-1,1e-1,1e-1,
                 1e-2,1e-2,1e-2
             ])
         )
 
+        # UPDATE
+        # =========================================================
+        
         # Detect traffic signals
         model_detection = model(rgb_left)
         detections = model_detection.pandas().xyxy[0]
@@ -226,7 +244,7 @@ def main() -> int:
         # MCL Update
         start_time = time.time()
 
-        mcl.weigh_in_driveable_area()
+        mcl.weigh_in_driveable_area(prob_inside_navigable_area=0.95)
         if detected_traffic_signal:
             mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
         if seq_idx % 5 == 0:
@@ -245,6 +263,9 @@ def main() -> int:
             Q = mcl_cov2d,
             timestamp = elapsed_time
         )
+
+        # BENCHMARK
+        # =========================================================
 
         # Store trajectory
         easting,northing,elevation = groundtruth_mean.flatten()[:3]
@@ -284,9 +305,12 @@ def main() -> int:
         
         print(f"Complete pipeline in the sequence took {time.time()-seq_start_time:.2f}s")
     
+    # OUTPUT
+    # =========================================================
     print("-----------\n")
     print("Exporting video to `results/`")
-    os.system(f"ffmpeg -framerate 10 -pattern_type glob -i 'results/{output_prefix}/frames/*.png' results/{output_prefix}/{output_prefix}.mp4")
+    os.system(f"ffmpeg -framerate 5 -pattern_type glob -i 'results/{output_prefix}/frames/*.png' results/{output_prefix}/{output_prefix}.mp4")
+    os.system(f"rm -rf 'results/{output_prefix}/frames'")
 
     print("-----------\n")
     print(f"Exporting trajectories to `results/{output_prefix}`")

@@ -240,7 +240,7 @@ class MCL:
     # Update-related
     # =========================================================================
 
-    def weigh_in_driveable_area(self) -> None:
+    def weigh_in_driveable_area(self, prob_inside_navigable_area : float = 0.90) -> None:
         # First check local map
         if self.should_update_local_map(tolerance_meters=15.0):
             x_min, y_min = np.min(self.particles[:,:2], axis=0)
@@ -254,7 +254,11 @@ class MCL:
         weights = []
         for point in particles_as_points:
             is_inside_any = np.any(self.local_driveable_map.geometry.contains(point))
-            weights.append(int(is_inside_any))
+            if is_inside_any:
+                w = prob_inside_navigable_area
+            else:
+                w = 1 - prob_inside_navigable_area
+            weights.append(w)
         weights = np.array( weights )
         self.resample(weights)
 
@@ -290,7 +294,7 @@ class MCL:
             bearing_magnitude = np.linalg.norm(traffic_signal_particle_frame)
             bearing_angle_rad = np.arctan2(traffic_signal_particle_frame[1], traffic_signal_particle_frame[0])
             bearing_angle_deg = np.rad2deg(bearing_angle_rad)
-            is_in_sight = ( bearing_magnitude < 10.0 ) and ( np.abs(bearing_angle_deg) < 40.0 )
+            is_in_sight = ( bearing_magnitude < 30.0 ) and ( np.abs(bearing_angle_deg) < 55.0 )
             if is_in_sight:
                 weights.append( normalizer_factor * sensitivity)
             else:

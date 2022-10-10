@@ -22,8 +22,15 @@ def project_geodataframe_to_best_utm(gdf : gpd.GeoDataFrame) -> Tuple[gpd.GeoDat
     # Project and return
     return gdf.to_crs(utm_crs), utm_crs
 
-def load_map_layers(osm_dir : str) -> Dict[str,gpd.GeoDataFrame]:
+def load_map_layers(osm_dir : str, lane_size_meters : float = 4.0) -> Dict[str,gpd.GeoDataFrame]:
     """
+    Arguments
+    ------------
+    osm_dir: str.
+        The directory where the cached map is stored.
+    lane_size_meters: float.
+        The standard lane size for the dataset location.
+
     Returns
     ------------
     A dictionary containing the following keys:
@@ -58,7 +65,7 @@ def load_map_layers(osm_dir : str) -> Dict[str,gpd.GeoDataFrame]:
         drive_network["lanes"] = drive_network["lanes"].apply(lambda x : x.replace(",","."))
         drive_network["lanes"] = drive_network["lanes"].astype(float)
         # Buffer the area for each lane
-        drive_network = drive_network.apply( lambda row : row["geometry"].buffer(row["lanes"] * 2.5) , axis=1 )
+        drive_network = drive_network.apply( lambda row : row["geometry"].buffer(row["lanes"] * (lane_size_meters/2) ) , axis=1 )
         # Save
         print("> Saving map to file - this might take long (~5 minutes)")
         drive_network = drive_network.set_crs(map_utm_crs)
@@ -68,8 +75,10 @@ def load_map_layers(osm_dir : str) -> Dict[str,gpd.GeoDataFrame]:
     # Read from cache
     else:
         print(f"> Road network cached file found at {road_network_path}")
-        drive_network = gpd.read_file(road_network_path)
-        map_utm_crs = drive_network.crs
+
+    # TODO: inneficient fix for the runtime error caused after storing the road network.        
+    drive_network = gpd.read_file(road_network_path)
+    map_utm_crs = drive_network.crs
 
     # Loads the traffic signs
     if not os.path.exists(traffic_signals_path):
@@ -77,7 +86,7 @@ def load_map_layers(osm_dir : str) -> Dict[str,gpd.GeoDataFrame]:
         traffic_signals = osm_map.get_data_by_custom_criteria(
             custom_filter={"highway":["traffic_signals"]}, # Keep data matching the criteria above
             filter_type="keep",
-            # Do not keep nodes (point data)    
+            # Keep nodes (point data)    
             keep_nodes=True, 
             keep_ways=False, 
             keep_relations=False
