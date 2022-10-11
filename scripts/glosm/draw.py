@@ -6,15 +6,15 @@ import matplotlib.pyplot as plt
 import geopandas as gpd
 from shapely.geometry import Polygon, Point
 
-def draw_pose_2d(x : float, y : float, yaw : float, ax : plt.Axes, label : Optional[str] = None) -> None:
+def draw_pose_2d(x : float, y : float, yaw : float, ax : plt.Axes, arrow_size = 1.5, label : Optional[str] = None) -> None:
     ax.scatter([x], [y], marker="x", color="black")
 
     # Draw coordinates system
-    dx = 1.5 * np.cos(yaw)
-    dy = 1.5 * np.sin(yaw)
+    dx = arrow_size * np.cos(yaw)
+    dy = arrow_size * np.sin(yaw)
     ax.arrow( x, y, dx, dy, color="red" )
-    dx = 1.5 * np.cos(yaw + (np.pi / 2) )
-    dy = 1.5 * np.sin(yaw + (np.pi / 2))
+    dx = arrow_size * np.cos(yaw + (np.pi / 2) )
+    dy = arrow_size * np.sin(yaw + (np.pi / 2))
     ax.arrow( x, y, dx, dy, color="green" )
     
     if label is not None:

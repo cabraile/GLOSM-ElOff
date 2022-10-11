@@ -167,7 +167,7 @@ class MCL:
         if draw_poses:
             for i in range(len(self.particles)):
                 x,y, yaw = self.particles[i]
-                draw_pose_2d(x,y,yaw,ax)
+                draw_pose_2d(x,y,yaw,ax, arrow_size=1.0)
         else:
             ax.scatter(self.particles[:,0], self.particles[:,1], c="orange", marker="x")
         

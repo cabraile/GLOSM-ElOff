@@ -293,9 +293,9 @@ def main() -> int:
             cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
             draw_navigable_area(layers["driveable_area"], ax)
             rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
-            mcl.plot(ax, draw_poses=False)
-            draw_pose_2d(x_gt,y_gt, yaw_gt, ax, "Groundtruth")
-            draw_pose_2d(x_est,y_est, yaw_est, ax, "Estimation")
+            mcl.plot(ax, draw_poses=True)
+            draw_pose_2d(x_gt,y_gt, yaw_gt, ax, label="Groundtruth")
+            draw_pose_2d(x_est,y_est, yaw_est, ax, label="Estimation")
             draw_traffic_signals(layers["traffic_signals"], ax)
             if not os.path.exists(f"results/{output_prefix}/frames"):
                 os.makedirs(f"results/{output_prefix}/frames")
