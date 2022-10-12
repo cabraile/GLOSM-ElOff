@@ -223,9 +223,10 @@ class MCL:
         self.eloff_global_z_variance += z_variance
 
         # ElOff - accumulate z for each particle
-        particles_z_before = self.get_dsm_z_at(self.particles)
-        particles_z_after = self.get_dsm_z_at(new_particles)
-        self.eloff_particles_z_accumulator += (particles_z_after - particles_z_before)
+        if self.dsm_array is not None:
+            particles_z_before = self.get_dsm_z_at(self.particles)
+            particles_z_after = self.get_dsm_z_at(new_particles)
+            self.eloff_particles_z_accumulator += (particles_z_after - particles_z_before)
 
         # Replace old particle values by the new ones
         self.particles = new_particles

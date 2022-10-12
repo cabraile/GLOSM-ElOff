@@ -36,7 +36,6 @@ sys.path.append(MODULES_PATH)
 from glosm.mcl          import MCL
 from glosm.draw         import draw_pose_2d, draw_navigable_area, draw_traffic_signals
 from glosm.map_manager  import load_map_layers
-from glosm.ekf          import EKF3D
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -46,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dsm_path", required=True, help="Path to the digital surface model's root directory.")
     parser.add_argument("--n_frames", default= 0, type=int, help="Number of frames to be loaded.")
     parser.add_argument("--osm", required=True, help="Path where the '.osm.pbf' is stored. If not exists, will download the dataset.")
+    parser.add_argument("--mode", default="glosm-eloff", choices=["glosm", "eloff", "glosm-eloff"], help="Whether to use only GLOSM, ElOff or both for estimations.")
     return parser.parse_args()
 
 def get_groundtruth_state_as_array( seq_data : OxtsPacket) -> np.ndarray:
@@ -87,9 +87,9 @@ def split_transform(T) -> Dict[str, float]:
 
 def main() -> int:
     args = parse_args()
-    output_prefix = f"{args.date}_drive_{args.drive}_sync"
+    output_prefix = f"{args.mode}_{args.date}_drive_{args.drive}_sync"
 
-    random_state = np.random.RandomState(np.random.MT19937(np.random.SeedSequence(123456789)))
+    np.random.seed(0)
 
     # Map elements
     print("Loading DSM")
@@ -98,11 +98,12 @@ def main() -> int:
     dsm_raster = rasterio.open(os.path.abspath(args.dsm_path))
     print(f"Took {time.time()-start_time:.2f}s")
 
-    print("Loading OSM data")
-    print("======================")
-    start_time = time.time()
-    layers = load_map_layers(args.osm)
-    print(f"Took {time.time()-start_time:.2f}s")
+    if "glosm" in args.mode:
+        print("Loading OSM data")
+        print("======================")
+        start_time = time.time()
+        layers = load_map_layers(args.osm)
+        print(f"Took {time.time()-start_time:.2f}s")
 
     # Kitti data
     data = pykitti.raw(os.path.abspath(args.dataset), args.date, args.drive)
@@ -117,7 +118,8 @@ def main() -> int:
     T_from_right_camera_to_imu  = T_from_lidar_to_imu @ np.linalg.inv(T_from_lidar_to_camera_right)
 
     # Detection Model
-    model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).half()
+    if "glosm" in args.mode:
+        model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).half()
 
     # Main loop
     initial_mean = get_groundtruth_state_as_array(data.oxts[0].packet)
@@ -131,12 +133,14 @@ def main() -> int:
 
     # Start estimation modules
     mcl = MCL()
-    mcl.set_digital_surface_model_map(dsm_raster)
-    mcl.set_driveable_map(layers["driveable_area"])
-    mcl.set_traffic_signals_map(layers["traffic_signals"])
-    mcl.set_stop_signs_map(layers["stop_signs"])
+    if "eloff" in args.mode:
+        mcl.set_digital_surface_model_map(dsm_raster)
+    if "glosm" in args.mode:
+        mcl.set_driveable_map(layers["driveable_area"])
+        mcl.set_traffic_signals_map(layers["traffic_signals"])
+        mcl.set_stop_signs_map(layers["stop_signs"])
+        mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
     mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([1.0,1.0, 1e-2]),n_particles=500)
-    mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
 
     laser_odometry = LaserOdometry(voxel_size=0.25, distance_threshold=3.5, frequency=10.0)
 
@@ -220,19 +224,22 @@ def main() -> int:
         # =========================================================
         
         # Detect traffic signals
-        model_detection = model(rgb_left)
-        detections = model_detection.pandas().xyxy[0]
-        detections = detections[detections["confidence"] > 0.7]
-        detected_traffic_signal = np.any( detections["name"] == "traffic light" )
-        detected_stop_sign = np.any( detections["name"] == "stop sign" )
-
-        # MCL Update
         start_time = time.time()
+        if "glosm" in args.mode:
+            model_detection = model(rgb_left)
+            detections = model_detection.pandas().xyxy[0]
+            detections = detections[detections["confidence"] > 0.7]
+            detected_traffic_signal = np.any( detections["name"] == "traffic light" )
+            detected_stop_sign = np.any( detections["name"] == "stop sign" )
 
-        mcl.weigh_in_driveable_area(prob_inside_navigable_area=0.95)
-        if detected_traffic_signal:
-            mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
-        if seq_idx % 5 == 0:
+            # MCL Update (GLOSM landmarks)
+            start_time = time.time()
+            mcl.weigh_in_driveable_area(prob_inside_navigable_area=0.95)
+            if detected_traffic_signal:
+                mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
+        
+        # MCL Update (ElOff)
+        if ("eloff" in args.mode) and (seq_idx % 5 == 0):
             mcl.weigh_eloff()
 
         duration = time.time() - start_time
@@ -285,24 +292,30 @@ def main() -> int:
             x_odom = trajectories["odometry"][-1]["easting"]
             y_odom = trajectories["odometry"][-1]["northing"]
             yaw_odom = trajectories["odometry"][-1]["yaw"]
+
             ax.cla()
             region_size_meters = 60.0
             ax.set_xlim([x_gt - region_size_meters/2.0, x_gt + region_size_meters/2.0])
             ax.set_ylim([y_gt - region_size_meters/2.0, y_gt + region_size_meters/2.0])
-            cx.add_basemap(ax, crs=layers["driveable_area"].crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
-            draw_navigable_area(layers["driveable_area"], ax)
-            rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
-            mcl.plot(ax, draw_poses=False)
+            cx.add_basemap(ax, crs=dsm_raster.crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
+            
+            if "glosm" in args.mode:
+                draw_navigable_area(layers["driveable_area"], ax)
+            mcl.plot(ax, draw_poses=False) # must be after the navigable area and before the traffic signals
+            if "glosm" in args.mode:
+                draw_traffic_signals(layers["traffic_signals"], ax)
+            if "eloff" in args.mode:
+                rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
+            
             draw_pose_2d(x_gt,y_gt, yaw_gt, ax, label="Groundtruth")
             draw_pose_2d(x_est,y_est, yaw_est, ax, label="Estimation")
             draw_pose_2d(x_odom,y_odom, yaw_odom, ax, label="Odometry")
-            draw_traffic_signals(layers["traffic_signals"], ax)
             if not os.path.exists(f"results/{output_prefix}/frames"):
                 os.makedirs(f"results/{output_prefix}/frames")
             plt.savefig(f"results/{output_prefix}/frames/{seq_idx:05}.png")
             duration = time.time() - start_time
             print(f"Took {1000*duration:.0f}ms for updating the visualization")
-        
+
         print(f"Complete pipeline in the sequence took {time.time()-seq_start_time:.2f}s")
     
     # OUTPUT
