@@ -155,8 +155,8 @@ class MCL:
         mask_oob = (particles_rows < 0) | (particles_rows >= nrows) | (particles_cols < 0) | (particles_cols >= ncols)
         mask_in_bounds = ~mask_oob
 
-        # Get the Z for each particle in bounds. Particles out of bounds will have should have a very large offset
-        dsm_z = np.full((len(self.particles)), np.inf)
+        # Get the Z for each particle in bounds.
+        dsm_z = np.full((len(self.particles)), 0.0)
         dsm_z[mask_in_bounds] = self.dsm_array[particles_row_col_array[mask_in_bounds,0], particles_row_col_array[mask_in_bounds,1]]
         
         # Particles that are inside nan positions (not filled by the DSM) will not have their offsets changed
@@ -294,7 +294,7 @@ class MCL:
             bearing_magnitude = np.linalg.norm(traffic_signal_particle_frame)
             bearing_angle_rad = np.arctan2(traffic_signal_particle_frame[1], traffic_signal_particle_frame[0])
             bearing_angle_deg = np.rad2deg(bearing_angle_rad)
-            is_in_sight = ( bearing_magnitude < 30.0 ) and ( np.abs(bearing_angle_deg) < 55.0 )
+            is_in_sight = ( bearing_magnitude < 50.0 ) and ( np.abs(bearing_angle_deg) < 55.0 )
             if is_in_sight:
                 weights.append( normalizer_factor * sensitivity)
             else:
