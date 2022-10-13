@@ -163,6 +163,7 @@ def main() -> int:
 
         # Retrieve sequence data
         elapsed_time = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
+        timestamp = data.timestamps[seq_idx].timestamp()
         print(f"Sequence ({seq_idx}/{len(data)}) - elapsed time: {elapsed_time}s")
         print("------------------------")
 
@@ -215,7 +216,7 @@ def main() -> int:
             control_array[[0,1,5]], 
             np.diag([position_var,position_var,orientation_var]), 
             z_offset=control_array.flatten()[2],
-            z_variance=1e-1
+            z_variance=1e-2
         )
         duration = time.time() - seq_start_time
         print(f"Took {1000*duration:.0f}ms for MCL prediction")
@@ -239,7 +240,7 @@ def main() -> int:
                 mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
         
         # MCL Update (ElOff)
-        if ("eloff" in args.mode) and (seq_idx % 5 == 0):
+        if ("eloff" in args.mode) and (seq_idx % 10 == 0):
             mcl.weigh_eloff()
 
         duration = time.time() - start_time
@@ -253,21 +254,25 @@ def main() -> int:
         easting,northing,elevation = groundtruth_mean.flatten()[:3]
         x,y,z = groundtruth_mean.flatten()[:3] - initial_mean.flatten()[:3]
         roll,pitch,yaw = groundtruth_mean.flatten()[3:6]
+        qx,qy,qz,qw = Rotation.from_euler("xyz",angles=(roll,pitch,yaw)).as_quat()
         trajectories["reference"].append({
-            "elapsed_time" : elapsed_time, 
+            "timestamp" : timestamp,"elapsed_time" : elapsed_time,
             "easting" : easting, "northing" : northing, "elevation" : elevation,  
             "x" : x, "y" : y, "z" : z, 
-            "roll" : roll, "pitch" : pitch, "yaw" : yaw
+            "roll" : roll, "pitch" : pitch, "yaw" : yaw,
+            "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
         })
         # - Estimated
         easting,northing = mcl.get_mean().flatten()[:2]
         x,y = mcl.get_mean().flatten()[:2] - initial_mean.flatten()[:2]
         yaw = mcl.get_mean().flatten()[-1]
+        qx,qy,qz,qw = Rotation.from_euler("xyz",angles=(0.0,0.0,yaw)).as_quat()
         trajectories["estimated"].append({
-            "elapsed_time" : elapsed_time, 
+            "timestamp" : timestamp, "timestamp" : timestamp,"elapsed_time" : elapsed_time, 
             "easting" : easting, "northing" : northing, "elevation" : 0.0,  
             "x" : x, "y" : y, "z" : 0.0,
-            "roll" : 0.0, "pitch" : 0.0, "yaw" : yaw
+            "roll" : 0.0, "pitch" : 0.0, "yaw" : yaw,
+            "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
         })
         # - Odometry
         T_from_lidar_to_lidar_init = laser_odometry.get_transform_from_frame_to_init()
@@ -275,12 +280,15 @@ def main() -> int:
         T_from_imu_to_utm = T_from_imu_init_to_utm @ T_from_imu_to_imu_init
         easting, northing, elevation = T_from_imu_to_utm[:3,3]
         x,y,z = T_from_imu_to_imu_init[:3,3]
-        roll, pitch, yaw = Rotation.from_matrix(T_from_imu_to_utm[:3,:3]).as_euler("xyz",degrees=False)
+        rotation = Rotation.from_matrix(T_from_imu_to_utm[:3,:3])
+        roll, pitch, yaw = rotation.as_euler("xyz",degrees=False)
+        qx,qy,qz,qw = rotation.as_quat()
         trajectories["odometry"].append({
-            "elapsed_time" : elapsed_time, 
+            "timestamp" : timestamp, "elapsed_time" : elapsed_time, 
             "easting" : easting, "northing" : northing, "elevation" : elevation,  
             "x" : x, "y" : y, "z" : z,
-            "roll" : roll, "pitch" : pitch, "yaw" : yaw
+            "roll" : roll, "pitch" : pitch, "yaw" : yaw,
+            "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
         })
 
         # Draw using the local map
@@ -328,7 +336,14 @@ def main() -> int:
     print("-----------\n")
     print(f"Exporting trajectories to `results/{output_prefix}`")
     for trajectory_name, trajectory in trajectories.items():
-        pd.DataFrame(trajectory).to_csv(f"results/{output_prefix}/{trajectory_name}_trajectory.csv",index=False)
+        pd.DataFrame(trajectory).to_csv(
+            f"results/{output_prefix}/{trajectory_name}_trajectory.csv",
+            columns=["timestamp","easting","northing","elevation", "qx", "qy", "qz", "qw"],
+            index=False,
+            header=False,
+            sep=" "
+        )
+    
     return 0
 
 if __name__=="__main__":
