@@ -62,8 +62,8 @@ def empirical_mean_and_covariance(poses : np.ndarray) -> Tuple[np.ndarray, np.nd
   covariance[2,2] = orientation_variance
   return mean, covariance
 
-class MCL:
-    """Distance-Route-based Monte Carlo Localization."""
+class MCLXYZYaw:
+    """Monte Carlo Localization."""
 
     def __init__(self) -> None:
         self.particles              = None
@@ -81,11 +81,6 @@ class MCL:
         # Local boundaries
         self.local_map_boundaries   = None
         self.local_map_size         = 200.0
-
-        # ElOff
-        self.eloff_global_z_accumulator = 0.0
-        self.eloff_global_z_variance = 0.0
-        self.eloff_particles_z_accumulator = np.zeros((0))
     
     # Map-related
     # ================================
@@ -173,12 +168,12 @@ class MCL:
         
     def get_mean(self) -> np.ndarray:
         """Returns the (x,y,yaw) array of the particles' mean."""
-        x_mean, y_mean = np.average(self.particles[:,:2], axis=0).flatten()
-        yaw_mean = circmean(self.particles[:,2], high=np.pi, low = -np.pi,)
-        return np.array([ x_mean, y_mean, yaw_mean ])
+        x_mean, y_mean, z_mean = np.average(self.particles[:,:3], axis=0).flatten()
+        yaw_mean = circmean(self.particles[:,3], high=np.pi, low = -np.pi,)
+        return np.array([ x_mean, y_mean, z_mean, yaw_mean ])
 
     def get_covariance(self) -> np.ndarray:
-        """Returns the covariance array of the variables x,y and yaw."""
+        """Returns the covariance array of the variables x,y, z and yaw."""
         # TODO: the covariance returned does not consider the circular nature 
         # of the yaw
         covariance = np.cov(self.particles.T)
@@ -189,44 +184,43 @@ class MCL:
 
     def sample(self, mean : np.ndarray, covariance : np.ndarray, n_particles : int) -> None:
         """Sample points around the provided mean."""
-        assert (mean.size == 3) and (covariance.shape[0] == 3), "Shapes should be 3-dimensional"
+        assert (mean.size == 4) and (covariance.shape[0] == 4), "Shapes should be 3-dimensional"
         self.particles = np.random.multivariate_normal(mean = mean, cov = covariance, size = n_particles)
-        self.particles[:,2] = normalize_orientation(self.particles[:,2])
+        self.particles[:,3] = normalize_orientation(self.particles[:,3])
 
-        # ElOff
-        self.eloff_global_z_accumulator = 0.0
-        self.eloff_global_z_variance = 0.0
-        self.eloff_particles_z_accumulator = np.zeros((n_particles))
-
-    def predict(self, control_array : np.ndarray, covariance : np.ndarray, z_offset : float, z_variance : float) -> None:
+    def predict(
+        self, 
+        delta_xyz : Tuple[float], 
+        delta_yaw : float,
+        position_covariance : np.ndarray,
+        orientation_variance : float
+    ) -> None:
         """Performs state prediction based on the control commands given and the 
         covariance matrix.
+
+        The control array should be provided as an
+
         """
-        u = control_array.reshape((3,1))
         # Project the control to each of the particles' coordinates
         offsets_list = []
+        translation = np.array(delta_xyz).reshape(3,1)
         for i in range(len(self.particles)):
-            rotation_matrix = build_2d_rotation_matrix(self.particles[i,2])
-            offsets = rotation_matrix @ u[:2].reshape(-1,1)
-            offsets_list.append(offsets)
-        offsets_array = np.vstack(offsets_list)
-        broadcast_yaw = np.array([u.flatten()[2]] * len(self.particles)).reshape(-1,1)
-        u_proj = np.hstack([ offsets_array.reshape(-1,2), broadcast_yaw.reshape(-1,1) ]).reshape(-1,3)
+            rotation_matrix = build_2d_rotation_matrix(self.particles[i,3])
+            offset_x, offset_y = rotation_matrix @ translation[:2]
+            offset_z = translation[2]
+            offsets_list.append( (offset_x, offset_y, offset_z ) )
+        
+        offsets_array = np.vstack(offsets_list).reshape(-1,3)
+        broadcast_yaw = np.array([delta_yaw] * len(self.particles)).reshape(-1,1)
+        u_proj = np.hstack([ offsets_array, broadcast_yaw ]).reshape(-1,4)
 
         # Sum the noisy control for each particle's state
-        noise_array = np.random.multivariate_normal( mean=np.zeros_like(u.flatten()), cov=covariance , size=len(self.particles))
-        new_particles = self.particles + ( u_proj + noise_array.reshape(-1,3) )
-        new_particles[:,2] = normalize_orientation(new_particles[:,2])
-
-        # ElOff - accumulate the z offset
-        self.eloff_global_z_accumulator += z_offset
-        self.eloff_global_z_variance += z_variance
-
-        # ElOff - accumulate z for each particle
-        if self.dsm_array is not None:
-            particles_z_before = self.get_dsm_z_at(self.particles)
-            particles_z_after = self.get_dsm_z_at(new_particles)
-            self.eloff_particles_z_accumulator += (particles_z_after - particles_z_before)
+        cov = np.eye(4)
+        cov[:3,:3] = position_covariance
+        cov[3,3] = orientation_variance
+        noise_array = np.random.multivariate_normal( mean=np.zeros((4,)), cov=cov , size=len(self.particles))
+        new_particles = self.particles + ( u_proj + noise_array.reshape(-1,4) )
+        new_particles[:,3] = normalize_orientation(new_particles[:,3])
 
         # Replace old particle values by the new ones
         self.particles = new_particles
@@ -234,7 +228,6 @@ class MCL:
     def resample(self, weights : np.ndarray) -> None:
         ids = low_variance_sampler(weights)
         self.particles = self.particles[ids]
-        self.eloff_particles_z_accumulator = self.eloff_particles_z_accumulator[ids]
 
     # =========================================================================
 
@@ -277,7 +270,7 @@ class MCL:
             traffic_signal_array = np.array( [ traffic_signal_point.x, traffic_signal_point.y ] )
 
             # Check if the traffic signal should be visible to the particle
-            particle_orientation = self.particles[particle_idx,2]
+            particle_orientation = self.particles[particle_idx,3]
             R_from_particle_to_world = np.array([
                 [np.cos(particle_orientation), - np.sin(particle_orientation)],
                 [np.sin(particle_orientation), np.sin(particle_orientation)]
@@ -304,41 +297,20 @@ class MCL:
         weights = np.array( weights )
         self.resample(weights)
 
-    def weigh_eloff(self) -> None:
-        # Only computes weights for particles inside valid regions
-        # The others will have weight = 0
-        valid_particles_mask = ~np.isnan(self.eloff_particles_z_accumulator)
-        weights = np.zeros((len(self.particles)))
-        
-        # If the proportion of invalid particles is too big, do not resample
-        if np.sum(valid_particles_mask) / len(self.particles) <= 0.1:
-            self.eloff_global_z_accumulator = 0.0
-            self.eloff_global_z_variance = 0.0
-            self.eloff_particles_z_accumulator = np.zeros((len(self.particles)))
-            return
-
+    def weigh_eloff(self, dsm_z_std : float = 0.1) -> None:
         # Compute the weights
-        delta_z_mean = self.eloff_global_z_accumulator
-        delta_z_stddev = self.eloff_global_z_variance ** 0.5
-        delta_z_particles = self.eloff_particles_z_accumulator[valid_particles_mask]
-        mahalanobis = np.abs( delta_z_particles - delta_z_mean)/(delta_z_stddev+0.001)
-        weights[valid_particles_mask] = 1./(mahalanobis+0.001)
+        dsm_z = self.get_dsm_z_at(self.particles[:,:2])
+        particles_z = self.particles[:,2]
+        mahalanobis = np.abs( particles_z - dsm_z)/dsm_z_std
+        weights = 1./(mahalanobis+0.001)
 
         # If the sum of weights is pretty low, do not resample
         sum_w = np.sum(weights)
         if sum_w <= 1e-10:
-            self.eloff_global_z_accumulator = 0.0
-            self.eloff_global_z_variance = 0.0
-            self.eloff_particles_z_accumulator = np.zeros((len(self.particles)))
             return
         
         # Resample
         weights_norm = weights / np.sum(sum_w)
         self.resample(weights_norm)
-
-        # Reset acummulators
-        self.eloff_global_z_accumulator = 0.0
-        self.eloff_global_z_variance = 0.0
-        self.eloff_particles_z_accumulator = np.zeros((len(self.particles)))
 
     # =========================================================================

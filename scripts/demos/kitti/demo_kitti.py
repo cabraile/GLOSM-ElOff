@@ -33,7 +33,7 @@ MODULES_PATH =os.path.realpath(
 )
 sys.path.append(MODULES_PATH)
 
-from glosm.mcl          import MCL
+from glosm.mcl          import MCLXYZYaw
 from glosm.draw         import draw_pose_2d, draw_navigable_area, draw_traffic_signals
 from glosm.map_manager  import load_map_layers
 
@@ -132,7 +132,7 @@ def main() -> int:
     T_from_imu_init_to_utm[:3,3] = initial_mean.flatten()[0:3]
 
     # Start estimation modules
-    mcl = MCL()
+    mcl = MCLXYZYaw()
     if "eloff" in args.mode:
         mcl.set_digital_surface_model_map(dsm_raster)
     if "glosm" in args.mode:
@@ -140,7 +140,7 @@ def main() -> int:
         mcl.set_traffic_signals_map(layers["traffic_signals"])
         mcl.set_stop_signs_map(layers["stop_signs"])
         mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
-    mcl.sample(initial_mean.flatten()[[0,1,5]], np.diag([1.0,1.0, 1e-2]),n_particles=500)
+    mcl.sample(initial_mean.flatten()[[0,1,2,5]], np.diag([1.0,1.0,1.0, 1e-2]), n_particles=500)
 
     laser_odometry = LaserOdometry(voxel_size=0.25, distance_threshold=3.5, frequency=10.0)
 
@@ -213,10 +213,10 @@ def main() -> int:
         orientation_var = orientation_std ** 2.0
 
         mcl.predict(
-            control_array[[0,1,5]], 
-            np.diag([position_var,position_var,orientation_var]), 
-            z_offset=control_array.flatten()[2],
-            z_variance=1e-2
+            delta_xyz = control_array[[0,1,2]],
+            delta_yaw = control_array[5],
+            position_covariance  = np.diag([position_var,position_var,1e-1]), 
+            orientation_variance = orientation_var
         )
         duration = time.time() - seq_start_time
         print(f"Took {1000*duration:.0f}ms for MCL prediction")
@@ -240,8 +240,8 @@ def main() -> int:
                 mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
         
         # MCL Update (ElOff)
-        if ("eloff" in args.mode) and (seq_idx % 10 == 0):
-            mcl.weigh_eloff()
+        if ("eloff" in args.mode) and (seq_idx % 4 == 0):
+            mcl.weigh_eloff(1.0)
 
         duration = time.time() - start_time
         print(f"Took {1000*duration:.0f}ms for MCL update")
@@ -258,36 +258,28 @@ def main() -> int:
         trajectories["reference"].append({
             "timestamp" : timestamp,"elapsed_time" : elapsed_time,
             "easting" : easting, "northing" : northing, "elevation" : elevation,  
-            "x" : x, "y" : y, "z" : z, 
-            "roll" : roll, "pitch" : pitch, "yaw" : yaw,
             "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
         })
         # - Estimated
-        easting,northing = mcl.get_mean().flatten()[:2]
-        x,y = mcl.get_mean().flatten()[:2] - initial_mean.flatten()[:2]
+        easting, northing, elevation = mcl.get_mean().flatten()[:3]
         yaw = mcl.get_mean().flatten()[-1]
         qx,qy,qz,qw = Rotation.from_euler("xyz",angles=(0.0,0.0,yaw)).as_quat()
         trajectories["estimated"].append({
-            "timestamp" : timestamp, "timestamp" : timestamp,"elapsed_time" : elapsed_time, 
-            "easting" : easting, "northing" : northing, "elevation" : 0.0,  
-            "x" : x, "y" : y, "z" : 0.0,
-            "roll" : 0.0, "pitch" : 0.0, "yaw" : yaw,
+            "timestamp" : timestamp, 
+            "easting" : easting, "northing" : northing, "elevation" : elevation,  
             "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
         })
         # - Odometry
         T_from_lidar_to_lidar_init = laser_odometry.get_transform_from_frame_to_init()
         T_from_imu_to_imu_init = T_from_lidar_to_imu @ T_from_lidar_to_lidar_init @ T_from_imu_to_lidar
         T_from_imu_to_utm = T_from_imu_init_to_utm @ T_from_imu_to_imu_init
-        easting, northing, elevation = T_from_imu_to_utm[:3,3]
-        x,y,z = T_from_imu_to_imu_init[:3,3]
-        rotation = Rotation.from_matrix(T_from_imu_to_utm[:3,:3])
-        roll, pitch, yaw = rotation.as_euler("xyz",degrees=False)
-        qx,qy,qz,qw = rotation.as_quat()
+        easting_odom, northing_odom, elevation_odom = T_from_imu_to_utm[:3,3]
+        rotation_odom = Rotation.from_matrix(T_from_imu_to_utm[:3,:3])
+        _, _, yaw_odom = rotation_odom.as_euler("xyz",degrees=False)
+        qx,qy,qz,qw = rotation_odom.as_quat()
         trajectories["odometry"].append({
-            "timestamp" : timestamp, "elapsed_time" : elapsed_time, 
-            "easting" : easting, "northing" : northing, "elevation" : elevation,  
-            "x" : x, "y" : y, "z" : z,
-            "roll" : roll, "pitch" : pitch, "yaw" : yaw,
+            "timestamp" : timestamp,
+            "easting" : easting_odom, "northing" : northing_odom, "elevation" : elevation_odom,  
             "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
         })
 
@@ -297,9 +289,8 @@ def main() -> int:
             x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
             x_est, y_est = mcl.get_mean().flatten()[:2]
             yaw_est = mcl.get_mean().flatten()[-1]
-            x_odom = trajectories["odometry"][-1]["easting"]
-            y_odom = trajectories["odometry"][-1]["northing"]
-            yaw_odom = trajectories["odometry"][-1]["yaw"]
+            x_odom = easting_odom
+            y_odom = northing_odom
 
             ax.cla()
             region_size_meters = 60.0
