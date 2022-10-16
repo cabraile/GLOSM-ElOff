@@ -1,0 +1,21 @@
+cache_dir: ".cached"
+n_particles: 2000
+slopy:
+  voxel_size: 0.25
+  frequency: 10.0
+  distance_threshold: 3.5
+glosm:
+  traffic_signals_landmarks:
+    enable: false
+    detector_sensitivity: 0.95
+    detector_false_positive_rate: 0.05 
+  navigable_area_weight_factor: 0.85
+eloff:
+  z_offset_stddev: 0.05
+  update_every_n_frames: 4
+  dsm_z_stddev: 0.6
+video:
+  record_trajectory: true
+  store_every_n_frames: 7
+  region_size_meters: 60.0
+  

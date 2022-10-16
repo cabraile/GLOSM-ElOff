@@ -1,5 +1,6 @@
 # 3rd party packages
 import os
+import yaml
 import sys
 import time
 import argparse
@@ -15,6 +16,7 @@ import utm
 import torch
 import rasterio
 import rasterio.plot
+from rasterio.windows import from_bounds
 
 import pykitti
 from pykitti.utils  import OxtsPacket
@@ -23,12 +25,18 @@ import open3d as o3d
 from slopy.odometry import Odometry as LaserOdometry
 from scipy.spatial.transform import Rotation
 
-# Importing GLOSM
+# Project-related path variables
 MODULES_PATH =os.path.realpath( 
     os.path.join(
         os.path.dirname(os.path.abspath(__file__)), # root/scripts/demos/kitti/
         os.path.pardir, # root/scripts/demos/
         os.path.pardir  # root/scripts/
+    )
+)
+PROJECT_PATH = os.path.realpath(
+    os.path.join(
+        MODULES_PATH,
+        os.path.pardir  # root/
     )
 )
 sys.path.append(MODULES_PATH)
@@ -40,11 +48,10 @@ from glosm.map_manager  import load_map_layers
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, help="Path to the dataset root directory.")
-    parser.add_argument("--date", default= "2011_09_26", help="Date of the dataset recording (YYYY_MM_DD).")
-    parser.add_argument("--drive", default= "0009", help="Drive number (XXXX).")
+    parser.add_argument("--date", required=True, help="Date of the dataset recording (YYYY_MM_DD).")
+    parser.add_argument("--drive", required=True, help="Drive number (XXXX).")
     parser.add_argument("--dsm_path", required=True, help="Path to the digital surface model's root directory.")
     parser.add_argument("--n_frames", default= 0, type=int, help="Number of frames to be loaded.")
-    parser.add_argument("--osm", required=True, help="Path where the '.osm.pbf' is stored. If not exists, will download the dataset.")
     parser.add_argument("--mode", default="glosm-eloff", choices=["glosm", "eloff", "glosm-eloff"], help="Whether to use only GLOSM, ElOff or both for estimations.")
     return parser.parse_args()
 
@@ -87,6 +94,9 @@ def split_transform(T) -> Dict[str, float]:
 
 def main() -> int:
     args = parse_args()
+    config_path = os.path.join(PROJECT_PATH,"cfg", "demo.yaml")
+    with open(config_path,"r") as cfg_file:
+        config = yaml.load(cfg_file,yaml.FullLoader)
     output_prefix = f"{args.mode}_{args.date}_drive_{args.drive}_sync"
 
     np.random.seed(0)
@@ -96,13 +106,15 @@ def main() -> int:
     print("======================")
     start_time = time.time()
     dsm_raster = rasterio.open(os.path.abspath(args.dsm_path))
+    dsm_min = np.nanmin(dsm_raster.read())
+    dsm_max = np.nanmax(dsm_raster.read())
     print(f"Took {time.time()-start_time:.2f}s")
 
     if "glosm" in args.mode:
         print("Loading OSM data")
         print("======================")
         start_time = time.time()
-        layers = load_map_layers(args.osm)
+        layers = load_map_layers(config["cache_dir"])
         print(f"Took {time.time()-start_time:.2f}s")
 
     # Kitti data
@@ -118,7 +130,7 @@ def main() -> int:
     T_from_right_camera_to_imu  = T_from_lidar_to_imu @ np.linalg.inv(T_from_lidar_to_camera_right)
 
     # Detection Model
-    if "glosm" in args.mode:
+    if ("glosm" in args.mode) and config["glosm"]["traffic_signals_landmarks"]["enable"]:
         model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).half()
 
     # Main loop
@@ -140,11 +152,18 @@ def main() -> int:
         mcl.set_traffic_signals_map(layers["traffic_signals"])
         mcl.set_stop_signs_map(layers["stop_signs"])
         mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
-    mcl.sample(initial_mean.flatten()[[0,1,2,5]], np.diag([1.0,1.0,1.0, 1e-2]), n_particles=500)
+    mcl.sample(
+        initial_mean.flatten()[[0,1,2,5]], 
+        np.diag([1.0,1.0,1.0, 1e-2]), 
+        n_particles=config["n_particles"]
+    )
 
-    laser_odometry = LaserOdometry(voxel_size=0.25, distance_threshold=3.5, frequency=10.0)
-
-    fig, ax = plt.subplots(1,1,figsize=(15,15))
+    laser_odometry = LaserOdometry(
+        voxel_size=0.25, 
+        distance_threshold=3.5, 
+        frequency=10.0,
+        mode="point-to-plane"
+    )
 
     # Stores results for exporting as CSV
     trajectories = {
@@ -164,7 +183,7 @@ def main() -> int:
         # Retrieve sequence data
         elapsed_time = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
         timestamp = data.timestamps[seq_idx].timestamp()
-        print(f"Sequence ({seq_idx}/{len(data)}) - elapsed time: {elapsed_time}s")
+        print(f"\nSequence ({seq_idx}/{len(data)}) - elapsed time: {elapsed_time}s")
         print("------------------------")
 
         # Load input data
@@ -177,7 +196,7 @@ def main() -> int:
 
         # Filter laser scan points
         scan_points_distances = np.linalg.norm(lidar_scan[:,:3],axis=1) 
-        keep_points_mask = (scan_points_distances < 60.0) & (scan_points_distances > 2.0)
+        keep_points_mask = (scan_points_distances < 120.0) & (scan_points_distances > 2.0)
         lidar_scan = lidar_scan[keep_points_mask,:]
 
         # LASER ODOMETRY
@@ -202,7 +221,7 @@ def main() -> int:
         control_array = np.array([ pose_offset_dict[k] for k in ["x", "y", "z", "roll", "pitch", "yaw"] ])
         
         # Compute position-related variance
-        error_per_meter = 0.8
+        error_per_meter = 1.0
         position_displacement = (pose_offset_dict["x"] ** 2.0 + pose_offset_dict["y"] ** 2.0) ** 0.5
         position_std = ( error_per_meter * position_displacement)/3.0 # ~3 stddev
         position_var = position_std ** 2.0
@@ -215,7 +234,13 @@ def main() -> int:
         mcl.predict(
             delta_xyz = control_array[[0,1,2]],
             delta_yaw = control_array[5],
-            position_covariance  = np.diag([position_var,position_var,1e-1]), 
+            position_covariance  = np.diag(
+                [
+                    position_var,
+                    position_var,
+                    config["eloff"]["dsm_z_stddev"] ** 2.0
+                ]
+            ), 
             orientation_variance = orientation_var
         )
         duration = time.time() - seq_start_time
@@ -225,25 +250,35 @@ def main() -> int:
         # =========================================================
         
         # Detect traffic signals
-        start_time = time.time()
+        duration_glosm = 0.0
         if "glosm" in args.mode:
-            model_detection = model(rgb_left)
-            detections = model_detection.pandas().xyxy[0]
-            detections = detections[detections["confidence"] > 0.7]
-            detected_traffic_signal = np.any( detections["name"] == "traffic light" )
-            detected_stop_sign = np.any( detections["name"] == "stop sign" )
+            if config["glosm"]["traffic_signals_landmarks"]["enable"]:
+                model_detection = model(rgb_left)
+                detections = model_detection.pandas().xyxy[0]
+                detections = detections[detections["confidence"] > 0.7]
+                detected_traffic_signal = np.any( detections["name"] == "traffic light" )
+                detected_stop_sign = np.any( detections["name"] == "stop sign" )
+
+                start_time = time.time()
+                if detected_traffic_signal:
+                    mcl.weigh_traffic_signal_detection(
+                        sensitivity = config["glosm"]["traffic_signals_landmarks"]["detector_sensitivity"], 
+                        false_positive_rate = config["glosm"]["traffic_signals_landmarks"]["detector_false_positive_rate"],
+                    )
+                duration_glosm += time.time() - start_time
 
             # MCL Update (GLOSM landmarks)
             start_time = time.time()
-            mcl.weigh_in_driveable_area(prob_inside_navigable_area=0.95)
-            if detected_traffic_signal:
-                mcl.weigh_traffic_signal_detection(sensitivity=0.95, false_positive_rate = 0.05)
+            mcl.weigh_in_driveable_area(prob_inside_navigable_area=config["glosm"]["navigable_area_weight_factor"])
+            duration_glosm += time.time() - start_time
         
         # MCL Update (ElOff)
-        if ("eloff" in args.mode) and (seq_idx % 4 == 0):
-            mcl.weigh_eloff(1.0)
+        start_time = time.time()
+        if ("eloff" in args.mode) and (seq_idx % config["eloff"]["update_every_n_frames"] == 0):
+            mcl.weigh_eloff(config["eloff"]["dsm_z_stddev"])
+        duration_eloff = time.time() - start_time
 
-        duration = time.time() - start_time
+        duration = duration_glosm + duration_eloff
         print(f"Took {1000*duration:.0f}ms for MCL update")
 
         # BENCHMARK
@@ -284,7 +319,7 @@ def main() -> int:
         })
 
         # Draw using the local map
-        if seq_idx % 7 == 0:
+        if config["video"]["record_trajectory"] and (seq_idx % config["video"]["store_every_n_frames"]) == 0:
             start_time = time.time()
             x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
             x_est, y_est = mcl.get_mean().flatten()[:2]
@@ -292,10 +327,14 @@ def main() -> int:
             x_odom = easting_odom
             y_odom = northing_odom
 
-            ax.cla()
-            region_size_meters = 60.0
-            ax.set_xlim([x_gt - region_size_meters/2.0, x_gt + region_size_meters/2.0])
-            ax.set_ylim([y_gt - region_size_meters/2.0, y_gt + region_size_meters/2.0])
+            region_size_meters = config["video"]["region_size_meters"]
+            left = x_gt - region_size_meters/2.0
+            right = x_gt + region_size_meters/2.0
+            top = y_gt + region_size_meters/2.0
+            bottom = y_gt - region_size_meters/2.0
+            fig, ax = plt.subplots(1,1,figsize=(15,15))
+            ax.set_xlim([left, right])
+            ax.set_ylim([bottom, top])
             cx.add_basemap(ax, crs=dsm_raster.crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
             
             if "glosm" in args.mode:
@@ -304,7 +343,11 @@ def main() -> int:
             if "glosm" in args.mode:
                 draw_traffic_signals(layers["traffic_signals"], ax)
             if "eloff" in args.mode:
-                rasterio.plot.show(dsm_raster, ax=ax, cmap="jet",alpha=1.0)
+                raster_window = dsm_raster.read(1,window=from_bounds(left, bottom, right, top, dsm_raster.transform)).squeeze()
+                ax.imshow(
+                    raster_window, cmap="jet", alpha=1.0, extent=(left,right, bottom,top),
+                    vmin=dsm_min, vmax=dsm_max
+                )
             
             draw_pose_2d(x_gt,y_gt, yaw_gt, ax, label="Groundtruth")
             draw_pose_2d(x_est,y_est, yaw_est, ax, label="Estimation")
@@ -320,9 +363,10 @@ def main() -> int:
     # OUTPUT
     # =========================================================
     print("-----------\n")
-    print("Exporting video to `results/`")
-    os.system(f"ffmpeg -framerate 5 -pattern_type glob -i 'results/{output_prefix}/frames/*.png' results/{output_prefix}/{output_prefix}.mp4")
-    os.system(f"rm -rf 'results/{output_prefix}/frames'")
+    if config["video"]["record_trajectory"]:
+        print("Exporting video to `results/`")
+        os.system(f"ffmpeg -framerate 5 -pattern_type glob -i 'results/{output_prefix}/frames/*.png' results/{output_prefix}/{output_prefix}.mp4")
+        os.system(f"rm -rf 'results/{output_prefix}/frames'")
 
     print("-----------\n")
     print(f"Exporting trajectories to `results/{output_prefix}`")
