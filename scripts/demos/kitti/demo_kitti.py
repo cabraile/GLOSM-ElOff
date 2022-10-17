@@ -81,7 +81,12 @@ def scan_array_to_pointcloud(scan : np.ndarray) -> o3d.geometry.PointCloud:
 
     Drops any additional field as intensity or color.
     """
-    xyz_array = scan[:,:3]
+
+    # Filter laser scan points
+    scan_points_distances = np.linalg.norm(scan[:,:3],axis=1) 
+    keep_points_mask = (scan_points_distances < 120.0) & (scan_points_distances > 2.0)
+    xyz_array = scan[keep_points_mask,:3]
+
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(xyz_array)
     return pcd
@@ -165,6 +170,10 @@ def main() -> int:
         mode="point-to-plane"
     )
 
+    # Register first scan - identity
+    lidar_pcd = scan_array_to_pointcloud(data.get_velo(0))
+    laser_odometry.register(lidar_pcd)
+
     # Stores results for exporting as CSV
     trajectories = {
         "odometry" : [],
@@ -175,7 +184,7 @@ def main() -> int:
     print()
     print("Started loop")
     print("======================")
-    for seq_idx in range(0,len(data)):
+    for seq_idx in range(1,len(data)):
 
         # LOAD DATA
         # =========================================================
@@ -194,10 +203,7 @@ def main() -> int:
         groundtruth_mean = get_groundtruth_state_as_array(gps_and_imu_data)
         lidar_scan  = data.get_velo(seq_idx)
 
-        # Filter laser scan points
-        scan_points_distances = np.linalg.norm(lidar_scan[:,:3],axis=1) 
-        keep_points_mask = (scan_points_distances < 120.0) & (scan_points_distances > 2.0)
-        lidar_scan = lidar_scan[keep_points_mask,:]
+        rpy_imu_prev = get_groundtruth_state_as_array(data.oxts[seq_idx-1].packet).flatten()[3:6]
 
         # LASER ODOMETRY
         # =========================================================
@@ -209,7 +215,13 @@ def main() -> int:
         seq_start_time = time.time()
         T_from_lidar_curr_to_lidar_prev = laser_odometry.register(lidar_pcd)
         T_from_imu_curr_to_imu_prev = T_from_lidar_to_imu @ T_from_lidar_curr_to_lidar_prev @ T_from_imu_to_lidar
+        
         pose_offset_dict = split_transform(T_from_imu_curr_to_imu_prev)
+
+        # Z displacement must be provided in world coordinates
+        R_from_imu_prev_to_utm = Rotation.from_euler(seq="xyz", angles=rpy_imu_prev, degrees=False).as_matrix()
+        _, _, delta_z_utm = R_from_imu_prev_to_utm @ T_from_imu_curr_to_imu_prev[:3,3]
+        pose_offset_dict["z"] = delta_z_utm
 
         duration = time.time() - seq_start_time
         print(f"Took {1000*duration:.0f}ms for registering scan")        
@@ -319,7 +331,7 @@ def main() -> int:
         })
 
         # Draw using the local map
-        if config["video"]["record_trajectory"] and (seq_idx % config["video"]["store_every_n_frames"]) == 0:
+        if config["video"]["record_trajectory"] and ( (seq_idx-1) % config["video"]["store_every_n_frames"]) == 0:
             start_time = time.time()
             x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
             x_est, y_est = mcl.get_mean().flatten()[:2]
@@ -346,7 +358,7 @@ def main() -> int:
                 raster_window = dsm_raster.read(1,window=from_bounds(left, bottom, right, top, dsm_raster.transform)).squeeze()
                 ax.imshow(
                     raster_window, cmap="jet", alpha=1.0, extent=(left,right, bottom,top),
-                    vmin=dsm_min, vmax=dsm_max
+                    vmin=groundtruth_mean[2]-2.5, vmax=groundtruth_mean[2]+3.5
                 )
             
             draw_pose_2d(x_gt,y_gt, yaw_gt, ax, label="Groundtruth")
@@ -355,6 +367,7 @@ def main() -> int:
             if not os.path.exists(f"results/{output_prefix}/frames"):
                 os.makedirs(f"results/{output_prefix}/frames")
             plt.savefig(f"results/{output_prefix}/frames/{seq_idx:05}.png")
+            plt.close("all")
             duration = time.time() - start_time
             print(f"Took {1000*duration:.0f}ms for updating the visualization")
 

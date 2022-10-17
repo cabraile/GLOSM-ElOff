@@ -11,9 +11,9 @@ glosm:
     detector_false_positive_rate: 0.05 
   navigable_area_weight_factor: 0.85
 eloff:
-  z_offset_stddev: 0.05
+  z_offset_stddev: 0.02
   update_every_n_frames: 4
-  dsm_z_stddev: 0.6
+  dsm_z_stddev: 0.3
 video:
   record_trajectory: true
   store_every_n_frames: 7
