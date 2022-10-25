@@ -12,6 +12,7 @@ import pandas as pd
 
 import contextily as cx
 import utm
+from scipy.spatial.transform import Rotation
 
 import torch
 import rasterio
@@ -23,7 +24,6 @@ from pykitti.utils  import OxtsPacket
 
 import open3d as o3d
 from slopy.odometry import Odometry as LaserOdometry
-from scipy.spatial.transform import Rotation
 
 # Project-related path variables
 MODULES_PATH =os.path.realpath( 
@@ -41,18 +41,21 @@ PROJECT_PATH = os.path.realpath(
 )
 sys.path.append(MODULES_PATH)
 
+from glosm.odometry import KittiFileReadOdometry
 from glosm.mcl          import MCLXYZYaw
 from glosm.draw         import draw_pose_2d, draw_navigable_area, draw_traffic_signals
 from glosm.map_manager  import load_map_layers
+from sequences_utils    import seq_to_date_mapping, seq_to_drive_mapping, seq_to_start_idx, seq_to_end_idx
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", required=True, help="Path to the dataset root directory.")
-    parser.add_argument("--date", required=True, help="Date of the dataset recording (YYYY_MM_DD).")
-    parser.add_argument("--drive", required=True, help="Drive number (XXXX).")
-    parser.add_argument("--dsm_path", required=True, help="Path to the digital surface model's root directory.")
-    parser.add_argument("--n_frames", default= 0, type=int, help="Number of frames to be loaded.")
-    parser.add_argument("--mode", default="glosm-eloff", choices=["glosm", "eloff", "glosm-eloff"], help="Whether to use only GLOSM, ElOff or both for estimations.")
+    parser.add_argument("--dataset",     required=True, help="Path to the dataset root directory.")
+    parser.add_argument("--sequence_id", required=True, help="Two-digits id of the Kitti sequence.")
+    parser.add_argument("--dsm_path",    required=True, help="Path to the digital surface model's root directory.")
+    parser.add_argument("--localization_mode",  default="glosm-eloff", choices=["glosm", "eloff", "glosm-eloff"], help="Whether to use only GLOSM, ElOff or both for estimations.")
+    parser.add_argument("--odometry_name",      default="odometry", help="Name of the odometry method used. Visualization purposes only.")
+    parser.add_argument("--odometry_mode",      default="slopy", choices=["slopy", "file"], help="How to estimate odometry")
+    parser.add_argument("--odometry_file_path", default="", help="The path to the file that contain the odometry estimates. Mandatory if `odometry_mode='file'`.")
     return parser.parse_args()
 
 def get_groundtruth_state_as_array( seq_data : OxtsPacket) -> np.ndarray:
@@ -102,7 +105,17 @@ def main() -> int:
     config_path = os.path.join(PROJECT_PATH,"cfg", "demo.yaml")
     with open(config_path,"r") as cfg_file:
         config = yaml.load(cfg_file,yaml.FullLoader)
-    output_prefix = f"{args.mode}_{args.date}_drive_{args.drive}_sync"
+
+    kitti_date = seq_to_date_mapping[args.sequence_id]
+    kitti_drive = seq_to_drive_mapping[args.sequence_id]
+    seq_start = seq_to_start_idx[args.sequence_id]
+    seq_end = seq_to_end_idx[args.sequence_id]
+    output_prefix = f"{args.odometry_name}+{args.localization_mode}"
+    video_output_dir = f"results/videos/{output_prefix}"
+    trajectories_output_dir = f"results/trajectories/{output_prefix}"
+    os.system(f"mkdir -p {video_output_dir}")
+    os.system(f"mkdir -p {trajectories_output_dir}/corrected")
+    os.system(f"mkdir -p {trajectories_output_dir}/uncorrected")
 
     np.random.seed(0)
 
@@ -111,11 +124,9 @@ def main() -> int:
     print("======================")
     start_time = time.time()
     dsm_raster = rasterio.open(os.path.abspath(args.dsm_path))
-    dsm_min = np.nanmin(dsm_raster.read())
-    dsm_max = np.nanmax(dsm_raster.read())
     print(f"Took {time.time()-start_time:.2f}s")
 
-    if "glosm" in args.mode:
+    if "glosm" in args.localization_mode:
         print("Loading OSM data")
         print("======================")
         start_time = time.time()
@@ -123,7 +134,7 @@ def main() -> int:
         print(f"Took {time.time()-start_time:.2f}s")
 
     # Kitti data
-    data = pykitti.raw(os.path.abspath(args.dataset), args.date, args.drive)
+    data = pykitti.raw(os.path.abspath(args.dataset), kitti_date, kitti_drive)
     K_left  = data.calib.K_cam3
     K_right = data.calib.K_cam2
     T_from_lidar_to_camera_left = data.calib.T_cam3_velo
@@ -131,15 +142,16 @@ def main() -> int:
     T_from_imu_to_lidar         = data.calib.T_velo_imu
     
     T_from_lidar_to_imu         = np.linalg.inv(T_from_imu_to_lidar) # TODO: use closed-form formula
-    T_from_left_camera_to_imu   = T_from_lidar_to_imu @ np.linalg.inv(T_from_lidar_to_camera_left)
-    T_from_right_camera_to_imu  = T_from_lidar_to_imu @ np.linalg.inv(T_from_lidar_to_camera_right)
+    T_from_lidar_to_cam0 = data.calib.T_cam0_velo
+    T_from_imu_to_cam0 = T_from_imu_to_lidar @ T_from_lidar_to_cam0
+    T_from_cam0_to_imu = np.linalg.inv(T_from_imu_to_cam0)
 
     # Detection Model
-    if ("glosm" in args.mode) and config["glosm"]["traffic_signals_landmarks"]["enable"]:
+    if ("glosm" in args.localization_mode) and config["glosm"]["traffic_signals_landmarks"]["enable"]:
         model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).half()
 
     # Main loop
-    initial_mean = get_groundtruth_state_as_array(data.oxts[0].packet)
+    initial_mean = get_groundtruth_state_as_array(data.oxts[seq_start].packet)
     T_from_imu_init_to_utm = np.eye(4)
     T_from_imu_init_to_utm[:3,:3] = Rotation.from_euler(
         "xyz",
@@ -147,44 +159,56 @@ def main() -> int:
         degrees=False
     ).as_matrix()
     T_from_imu_init_to_utm[:3,3] = initial_mean.flatten()[0:3]
+    T_from_utm_to_imu_init = np.linalg.inv(T_from_imu_init_to_utm)
 
     # Start estimation modules
+    print("Initializing odometry and MCL modules")
+    print("======================")
     mcl = MCLXYZYaw()
-    if "eloff" in args.mode:
+    if "eloff" in args.localization_mode:
         mcl.set_digital_surface_model_map(dsm_raster)
-    if "glosm" in args.mode:
+    if "glosm" in args.localization_mode:
         mcl.set_driveable_map(layers["driveable_area"])
         mcl.set_traffic_signals_map(layers["traffic_signals"])
         mcl.set_stop_signs_map(layers["stop_signs"])
         mcl.load_local_region_map( initial_mean[0], initial_mean[1], 200.0 )
     mcl.sample(
         initial_mean.flatten()[[0,1,2,5]], 
-        np.diag([1.0,1.0,1.0, 1e-2]), 
+        np.diag([0.01,0.01,0.01, 1e-4]), 
         n_particles=config["n_particles"]
     )
 
-    laser_odometry = LaserOdometry(
-        voxel_size=0.25, 
-        distance_threshold=3.5, 
-        frequency=10.0,
-        mode="point-to-plane"
-    )
+    if args.odometry_mode == "slopy":
+        odometry = LaserOdometry(
+            voxel_size=0.25, 
+            distance_threshold=3.5, 
+            frequency=10.0,
+            mode="point-to-plane"
+        )
 
-    # Register first scan - identity
-    lidar_pcd = scan_array_to_pointcloud(data.get_velo(0))
-    laser_odometry.register(lidar_pcd)
+        # Register first scan - identity
+        lidar_pcd = scan_array_to_pointcloud(data.get_velo(0))
+        odometry.register(lidar_pcd)
+    elif args.odometry_mode == "file":
+        print("> Loading odometry file")
+        odometry = KittiFileReadOdometry(
+            args.odometry_file_path,
+            xyz=initial_mean.flatten()[[0,1,2]],
+            rpy=initial_mean.flatten()[[3,4,5]],
+            T_from_imu_to_cam0=T_from_imu_to_cam0
+        )
+        print("> Done")
 
     # Stores results for exporting as CSV
     trajectories = {
-        "odometry" : [],
-        "reference" : [],
-        "estimated" : []
+        "odometry" : [ list(np.eye(3,4).flatten()) ],
+        "estimated" : [ list(np.eye(3,4).flatten()) ]
     }
 
     print()
     print("Started loop")
     print("======================")
-    for seq_idx in range(1,len(data)):
+    for seq_idx in range(seq_start+1,seq_end+1):
 
         # LOAD DATA
         # =========================================================
@@ -201,21 +225,26 @@ def main() -> int:
         rgb_left = np.array(rgb_left)
         rgb_right = np.array(rgb_right)
         groundtruth_mean = get_groundtruth_state_as_array(gps_and_imu_data)
-        lidar_scan  = data.get_velo(seq_idx)
+       
+        # Laser scans to Point Cloud
+        if args.odometry_mode == "slopy":
+            lidar_scan  = data.get_velo(seq_idx)
+            lidar_pcd = scan_array_to_pointcloud(lidar_scan)
 
         rpy_imu_prev = get_groundtruth_state_as_array(data.oxts[seq_idx-1].packet).flatten()[3:6]
 
-        # LASER ODOMETRY
+        # ODOMETRY
         # =========================================================
-
-        # To Point Cloud
-        lidar_pcd = scan_array_to_pointcloud(lidar_scan)
 
         # Odometry estimation
         seq_start_time = time.time()
-        T_from_lidar_curr_to_lidar_prev = laser_odometry.register(lidar_pcd)
-        T_from_imu_curr_to_imu_prev = T_from_lidar_to_imu @ T_from_lidar_curr_to_lidar_prev @ T_from_imu_to_lidar
+        if args.odometry_mode == "slopy":
+            T_from_lidar_curr_to_lidar_prev = odometry.register(lidar_pcd)
+            T_from_imu_curr_to_imu_prev = T_from_lidar_to_imu @ T_from_lidar_curr_to_lidar_prev @ T_from_imu_to_lidar
         
+        if args.odometry_mode == "file":
+            T_from_imu_curr_to_imu_prev = odometry.step()
+
         pose_offset_dict = split_transform(T_from_imu_curr_to_imu_prev)
 
         # Z displacement must be provided in world coordinates
@@ -233,14 +262,14 @@ def main() -> int:
         control_array = np.array([ pose_offset_dict[k] for k in ["x", "y", "z", "roll", "pitch", "yaw"] ])
         
         # Compute position-related variance
-        error_per_meter = 1.0
+        error_per_meter = 0.3
         position_displacement = (pose_offset_dict["x"] ** 2.0 + pose_offset_dict["y"] ** 2.0) ** 0.5
-        position_std = ( error_per_meter * position_displacement)/3.0 # ~3 stddev
+        position_std = error_per_meter * position_displacement
         position_var = position_std ** 2.0
 
         # Compute orientation-related variance
-        error_per_rad = 0.4
-        orientation_std = ( error_per_rad * np.abs(pose_offset_dict["yaw"]))/3.0
+        error_per_rad = 0.05
+        orientation_std = error_per_rad * np.abs(pose_offset_dict["yaw"])
         orientation_var = orientation_std ** 2.0
 
         mcl.predict(
@@ -263,7 +292,7 @@ def main() -> int:
         
         # Detect traffic signals
         duration_glosm = 0.0
-        if "glosm" in args.mode:
+        if "glosm" in args.localization_mode:
             if config["glosm"]["traffic_signals_landmarks"]["enable"]:
                 model_detection = model(rgb_left)
                 detections = model_detection.pandas().xyxy[0]
@@ -286,7 +315,7 @@ def main() -> int:
         
         # MCL Update (ElOff)
         start_time = time.time()
-        if ("eloff" in args.mode) and (seq_idx % config["eloff"]["update_every_n_frames"] == 0):
+        if ("eloff" in args.localization_mode) and (seq_idx % config["eloff"]["update_every_n_frames"] == 0):
             mcl.weigh_eloff(config["eloff"]["dsm_z_stddev"])
         duration_eloff = time.time() - start_time
 
@@ -297,38 +326,28 @@ def main() -> int:
         # =========================================================
 
         # Store trajectories
-        # - Reference
-        easting,northing,elevation = groundtruth_mean.flatten()[:3]
-        x,y,z = groundtruth_mean.flatten()[:3] - initial_mean.flatten()[:3]
-        roll,pitch,yaw = groundtruth_mean.flatten()[3:6]
-        qx,qy,qz,qw = Rotation.from_euler("xyz",angles=(roll,pitch,yaw)).as_quat()
-        trajectories["reference"].append({
-            "timestamp" : timestamp,"elapsed_time" : elapsed_time,
-            "easting" : easting, "northing" : northing, "elevation" : elevation,  
-            "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
-        })
         # - Estimated
         easting, northing, elevation = mcl.get_mean().flatten()[:3]
         yaw = mcl.get_mean().flatten()[-1]
-        qx,qy,qz,qw = Rotation.from_euler("xyz",angles=(0.0,0.0,yaw)).as_quat()
-        trajectories["estimated"].append({
-            "timestamp" : timestamp, 
-            "easting" : easting, "northing" : northing, "elevation" : elevation,  
-            "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
-        })
+        T_from_imu_to_utm = np.eye(4)
+        T_from_imu_to_utm[:3,:3] = Rotation.from_euler("xyz",angles=(0.0,0.0,yaw)).as_matrix()
+        T_from_imu_to_utm[:3,3] = [easting, northing, elevation]
+        T_from_cam0_to_cam0_init = T_from_imu_to_cam0 @ T_from_utm_to_imu_init @ T_from_imu_to_utm @ T_from_cam0_to_imu
+        trajectories["estimated"].append(list(T_from_cam0_to_cam0_init[:3].flatten()))
+
         # - Odometry
-        T_from_lidar_to_lidar_init = laser_odometry.get_transform_from_frame_to_init()
-        T_from_imu_to_imu_init = T_from_lidar_to_imu @ T_from_lidar_to_lidar_init @ T_from_imu_to_lidar
-        T_from_imu_to_utm = T_from_imu_init_to_utm @ T_from_imu_to_imu_init
-        easting_odom, northing_odom, elevation_odom = T_from_imu_to_utm[:3,3]
-        rotation_odom = Rotation.from_matrix(T_from_imu_to_utm[:3,:3])
-        _, _, yaw_odom = rotation_odom.as_euler("xyz",degrees=False)
-        qx,qy,qz,qw = rotation_odom.as_quat()
-        trajectories["odometry"].append({
-            "timestamp" : timestamp,
-            "easting" : easting_odom, "northing" : northing_odom, "elevation" : elevation_odom,  
-            "qx" : qx, "qy" : qy, "qz" : qz, "qw" : qw
-        })
+        if args.odometry_mode == "slopy":
+            T_from_lidar_to_lidar_init = odometry.get_transform_from_frame_to_init()
+            T_from_imu_to_imu_init = T_from_lidar_to_imu @ T_from_lidar_to_lidar_init @ T_from_imu_to_lidar
+            T_from_imu_to_utm = T_from_imu_init_to_utm @ T_from_imu_to_imu_init
+
+        elif args.odometry_mode == "file":
+            T_from_imu_to_utm = odometry.get_transform_from_frame_to_init()
+
+        easting_odom, northing_odom, _ = T_from_imu_to_utm[:3,3]
+        _, _, yaw_odom = Rotation.from_matrix(T_from_imu_to_utm[:3,:3]).as_euler("xyz",degrees=False)
+        T_from_cam0_to_cam0_init = T_from_imu_to_cam0 @ T_from_utm_to_imu_init @ T_from_imu_to_utm @ T_from_cam0_to_imu
+        trajectories["odometry"].append(list(T_from_cam0_to_cam0_init[:3].flatten()))
 
         # Draw using the local map
         if config["video"]["record_trajectory"] and ( (seq_idx-1) % config["video"]["store_every_n_frames"]) == 0:
@@ -340,21 +359,24 @@ def main() -> int:
             y_odom = northing_odom
 
             region_size_meters = config["video"]["region_size_meters"]
-            left = x_gt - region_size_meters/2.0
-            right = x_gt + region_size_meters/2.0
-            top = y_gt + region_size_meters/2.0
-            bottom = y_gt - region_size_meters/2.0
+            left    = x_gt - region_size_meters/2.0
+            right   = x_gt + region_size_meters/2.0
+            top     = y_gt + region_size_meters/2.0
+            bottom  = y_gt - region_size_meters/2.0
             fig, ax = plt.subplots(1,1,figsize=(15,15))
             ax.set_xlim([left, right])
             ax.set_ylim([bottom, top])
             cx.add_basemap(ax, crs=dsm_raster.crs.to_string(), source=cx.providers.OpenStreetMap.Mapnik)
             
-            if "glosm" in args.mode:
+            if "glosm" in args.localization_mode:
                 draw_navigable_area(layers["driveable_area"], ax)
+            
             mcl.plot(ax, draw_poses=False) # must be after the navigable area and before the traffic signals
-            if "glosm" in args.mode:
+            
+            if "glosm" in args.localization_mode:
                 draw_traffic_signals(layers["traffic_signals"], ax)
-            if "eloff" in args.mode:
+            
+            if "eloff" in args.localization_mode:
                 raster_window = dsm_raster.read(1,window=from_bounds(left, bottom, right, top, dsm_raster.transform)).squeeze()
                 ax.imshow(
                     raster_window, cmap="jet", alpha=1.0, extent=(left,right, bottom,top),
@@ -363,10 +385,10 @@ def main() -> int:
             
             draw_pose_2d(x_gt,y_gt, yaw_gt, ax, label="Groundtruth")
             draw_pose_2d(x_est,y_est, yaw_est, ax, label="Estimation")
-            draw_pose_2d(x_odom,y_odom, yaw_odom, ax, label="Odometry")
-            if not os.path.exists(f"results/{output_prefix}/frames"):
-                os.makedirs(f"results/{output_prefix}/frames")
-            plt.savefig(f"results/{output_prefix}/frames/{seq_idx:05}.png")
+            draw_pose_2d(x_odom,y_odom, yaw_odom, ax, label=args.odometry_name)
+            if not os.path.exists(f"{video_output_dir}/frames"):
+                os.makedirs(f"{video_output_dir}/frames")
+            plt.savefig(f"{video_output_dir}/frames/{seq_idx:05}.png")
             plt.close("all")
             duration = time.time() - start_time
             print(f"Took {1000*duration:.0f}ms for updating the visualization")
@@ -377,21 +399,24 @@ def main() -> int:
     # =========================================================
     print("-----------\n")
     if config["video"]["record_trajectory"]:
-        print("Exporting video to `results/`")
-        os.system(f"ffmpeg -framerate 5 -pattern_type glob -i 'results/{output_prefix}/frames/*.png' results/{output_prefix}/{output_prefix}.mp4")
-        os.system(f"rm -rf 'results/{output_prefix}/frames'")
+        print(f"Exporting video to `{video_output_dir}`")
+        os.system(f"ffmpeg -framerate 5 -pattern_type glob -i '{video_output_dir}/frames/*.png' {video_output_dir}/{args.sequence_id}.mp4")
+        os.system(f"rm -rf '{video_output_dir}/frames'")
 
     print("-----------\n")
-    print(f"Exporting trajectories to `results/{output_prefix}`")
-    for trajectory_name, trajectory in trajectories.items():
-        pd.DataFrame(trajectory).to_csv(
-            f"results/{output_prefix}/{trajectory_name}_trajectory.csv",
-            columns=["timestamp","easting","northing","elevation", "qx", "qy", "qz", "qw"],
-            index=False,
-            header=False,
-            sep=" "
-        )
-    
+    print(f"Exporting trajectories to `{trajectories_output_dir}`")
+    with open(f"{trajectories_output_dir}/corrected/{args.sequence_id}.txt","w") as corrected_seq_file:
+        for transform in trajectories["estimated"]:
+            tokens = list(map(str,transform))
+            output_line = " ".join(tokens) + "\n"
+            corrected_seq_file.write(output_line)
+
+    with open(f"{trajectories_output_dir}/uncorrected/{args.sequence_id}.txt","w") as uncorrected_seq_file:
+        for transform in trajectories["odometry"]:
+            tokens = list(map(str,transform))
+            output_line = " ".join(tokens) + "\n"
+            uncorrected_seq_file.write(output_line)
+
     return 0
 
 if __name__=="__main__":

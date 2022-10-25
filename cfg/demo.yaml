@@ -1,5 +1,5 @@
 cache_dir: ".cached"
-n_particles: 2000
+n_particles: 500
 slopy:
   voxel_size: 0.25
   frequency: 10.0
@@ -11,11 +11,10 @@ glosm:
     detector_false_positive_rate: 0.05 
   navigable_area_weight_factor: 0.85
 eloff:
-  z_offset_stddev: 0.02
+  z_offset_stddev: 0.1
   update_every_n_frames: 4
-  dsm_z_stddev: 0.3
+  dsm_z_stddev: 0.5
 video:
   record_trajectory: true
   store_every_n_frames: 7
   region_size_meters: 60.0
-  

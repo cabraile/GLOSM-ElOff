@@ -1,11 +1,12 @@
 from typing import Optional
-import time
+import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
 
 from glosm.rotation import rotation_matrix_from_euler_angles
 from glosm.draw import draw_pose_2d
+from glosm.io import kitti_odometry_line_to_transform
 
 class InertialOdometry:
     # TODO: for now ignores xyz
@@ -94,3 +95,51 @@ class GPSOdometryProvider:
         delta_orientation = Rotation.from_matrix(T_from_curr_to_prev[:3,:3]).as_euler("xyz",degrees=False).reshape(3,1)
 
         return np.vstack([delta_position, delta_orientation])
+
+class KittiFileReadOdometry:
+    """Odometry recorded from other methods in the Kitti format.
+    
+    They are expected to be received in the cam0 coordinates, but the odometry 
+    is provided in the IMU coordinates.
+    """
+
+    def __init__(self, file_path : str, xyz : np.ndarray, rpy : np.ndarray, T_from_imu_to_cam0 : np.ndarray) -> None:
+        self.T_from_imu_init_to_utm = np.eye(4)
+        self.T_from_imu_init_to_utm[:3,:3] = Rotation.from_euler("xyz",rpy,degrees=False).as_matrix()
+        self.T_from_imu_init_to_utm[:3,3] = xyz
+        self.T_from_imu_to_cam0 = T_from_imu_to_cam0
+        self.T_from_cam0_to_imu = np.linalg.inv(T_from_imu_to_cam0)
+        self.current_trajectory_idx = -1
+
+        # Load the trajectory already in the IMU coordinates
+        self.trajectory_imu = []
+        with open(file_path, "r") as in_file:
+            for line in tqdm.tqdm(in_file):
+                T_from_cam0_curr_to_cam0_init = kitti_odometry_line_to_transform(line)
+                T_from_imu_curr_to_imu_init = self.T_from_cam0_to_imu @ T_from_cam0_curr_to_cam0_init @ T_from_imu_to_cam0
+                self.trajectory_imu.append( T_from_imu_curr_to_imu_init )
+
+    def step(self) -> np.ndarray:
+        self.current_trajectory_idx += 1
+        curr_index = self.current_trajectory_idx
+        T_from_imu_curr_to_imu_init = self.trajectory_imu[curr_index]
+
+        if curr_index == 0:
+            return T_from_imu_curr_to_imu_init
+
+        prev_index = self.current_trajectory_idx-1
+        T_from_imu_prev_to_imu_init = self.trajectory_imu[prev_index]
+        T_from_imu_init_to_imu_prev = np.linalg.inv(T_from_imu_prev_to_imu_init)
+        T_from_imu_curr_to_imu_prev = T_from_imu_init_to_imu_prev @ T_from_imu_curr_to_imu_init
+        return T_from_imu_curr_to_imu_prev
+
+    def get_transform_from_frame_to_init(self) -> np.ndarray:
+        curr_index = self.current_trajectory_idx + 1
+        T_from_imu_curr_to_imu_init = self.trajectory_imu[curr_index]
+        T_from_imu_curr_to_utm = self.T_from_imu_init_to_utm @ T_from_imu_curr_to_imu_init
+        return T_from_imu_curr_to_utm
+
+    def get_transform_from_frame_to_odom(self)-> np.ndarray:
+        curr_index = self.current_trajectory_idx + 1
+        T_from_imu_curr_to_imu_init = self.trajectory_imu[curr_index]
+        return T_from_imu_curr_to_imu_init

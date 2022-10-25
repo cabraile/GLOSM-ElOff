@@ -7,9 +7,9 @@ import pykitti
 
 DATASET_DIR = "/media/braile/One Touch2/Files/Acadêmico/datasets/kitti/datasets_kitti_raw_and_odometry/extracted"
 DATE="2011_09_30"
-DRIVE="0034"
+DRIVE="0033"
 MODE="glosm-eloff"
-INPUT_FILE_PATH = f"results/2022-oct-18/{MODE}_{DATE}_drive_{DRIVE}_sync/estimated_trajectory.csv"
+INPUT_FILE_PATH = f"results/estimations/{MODE}_{DATE}_drive_{DRIVE}_sync/{MODE}_trajectory.csv"
 OUTPUT_FILE_DIR = f"results/kitti_format/"
 
 date_drive_to_seq_mapping = {
