@@ -4,6 +4,7 @@ import yaml
 import sys
 import time
 import argparse
+import tqdm
 from typing import Dict
 
 import numpy as np
@@ -118,6 +119,7 @@ def main() -> int:
     os.system(f"mkdir -p {trajectories_output_dir}/uncorrected")
 
     np.random.seed(0)
+    os.system("clear")
 
     # Map elements
     print("Loading DSM")
@@ -191,12 +193,15 @@ def main() -> int:
         odometry.register(lidar_pcd)
     elif args.odometry_mode == "file":
         print("> Loading odometry file")
+        print(f"> Loading from sequence idx {seq_start}")
         odometry = KittiFileReadOdometry(
             args.odometry_file_path,
             xyz=initial_mean.flatten()[[0,1,2]],
             rpy=initial_mean.flatten()[[3,4,5]],
             T_from_imu_to_cam0=T_from_imu_to_cam0
         )
+        assert len(odometry.trajectory_imu) == seq_end - seq_start + 1, \
+            f"Error: odometry loaded from file contains {len(odometry.trajectory_imu)} elements: defined sequence should contain {seq_end - seq_start + 1}!"
         print("> Done")
 
     # Stores results for exporting as CSV
@@ -208,17 +213,25 @@ def main() -> int:
     print()
     print("Started loop")
     print("======================")
-    for seq_idx in range(seq_start+1,seq_end+1):
+    last_eloff_update_timestamp = data.timestamps[seq_start].timestamp()
+    last_glosm_update_timestamp = data.timestamps[seq_start].timestamp()
+    loop_start_time = time.time()
+    N_frames = seq_end - seq_start + 1
+    glosm_update_time_list = []
+    eloff_update_time_list = []
+    prediction_time_list = []
+    for seq_idx in tqdm.tqdm(range(seq_start+1,seq_end+1)):
 
         # LOAD DATA
         # =========================================================
 
         # Retrieve sequence data
-        elapsed_time = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
+        simulated_elapsed_time = (data.timestamps[seq_idx] - data.timestamps[0]).total_seconds()
         timestamp = data.timestamps[seq_idx].timestamp()
-        print(f"\nSequence ({seq_idx}/{len(data)}) - elapsed time: {elapsed_time}s")
-        print("------------------------")
-
+        real_elapsed_time = time.time() - loop_start_time
+        eta = real_elapsed_time * ( (N_frames / (seq_idx-seq_start) ) - 1 )
+        time_per_frame = (real_elapsed_time/(seq_idx-seq_start))
+        
         # Load input data
         gps_and_imu_data = data.oxts[seq_idx].packet
         rgb_right, rgb_left = data.get_rgb(seq_idx) # right = cam2, left = cam3
@@ -253,8 +266,7 @@ def main() -> int:
         pose_offset_dict["z"] = delta_z_utm
 
         duration = time.time() - seq_start_time
-        print(f"Took {1000*duration:.0f}ms for registering scan")        
-
+        
         # PREDICTION
         # =========================================================
 
@@ -262,14 +274,11 @@ def main() -> int:
         control_array = np.array([ pose_offset_dict[k] for k in ["x", "y", "z", "roll", "pitch", "yaw"] ])
         
         # Compute position-related variance
-        error_per_meter = 0.3
-        position_displacement = (pose_offset_dict["x"] ** 2.0 + pose_offset_dict["y"] ** 2.0) ** 0.5
-        position_std = error_per_meter * position_displacement
+        position_std = 0.33
         position_var = position_std ** 2.0
 
         # Compute orientation-related variance
-        error_per_rad = 0.05
-        orientation_std = error_per_rad * np.abs(pose_offset_dict["yaw"])
+        orientation_std = 0.01
         orientation_var = orientation_std ** 2.0
 
         mcl.predict(
@@ -285,7 +294,7 @@ def main() -> int:
             orientation_variance = orientation_var
         )
         duration = time.time() - seq_start_time
-        print(f"Took {1000*duration:.0f}ms for MCL prediction")
+        prediction_time_list.append(duration)
         
         # UPDATE
         # =========================================================
@@ -309,19 +318,24 @@ def main() -> int:
                 duration_glosm += time.time() - start_time
 
             # MCL Update (GLOSM landmarks)
-            start_time = time.time()
-            mcl.weigh_in_driveable_area(prob_inside_navigable_area=config["glosm"]["navigable_area_weight_factor"])
-            duration_glosm += time.time() - start_time
-        
+            delta_T_last_updated = timestamp - last_glosm_update_timestamp 
+            if (delta_T_last_updated >= config["glosm"]["map_correction_every_t_seconds"]):
+                start_time = time.time()
+                mcl.weigh_in_driveable_area(prob_inside_navigable_area=config["glosm"]["navigable_area_weight_factor"])
+                last_glosm_update_timestamp = timestamp
+                duration_glosm += time.time() - start_time
+        glosm_update_time_list.append(duration_glosm)
+
         # MCL Update (ElOff)
         start_time = time.time()
-        if ("eloff" in args.localization_mode) and (seq_idx % config["eloff"]["update_every_n_frames"] == 0):
+        delta_T_last_updated = timestamp - last_eloff_update_timestamp 
+        if ("eloff" in args.localization_mode) and (delta_T_last_updated >= config["eloff"]["update_every_t_seconds"]):
             mcl.weigh_eloff(config["eloff"]["dsm_z_stddev"])
+            last_eloff_update_timestamp = timestamp
         duration_eloff = time.time() - start_time
+        eloff_update_time_list.append(duration_eloff)
 
-        duration = duration_glosm + duration_eloff
-        print(f"Took {1000*duration:.0f}ms for MCL update")
-
+        
         # BENCHMARK
         # =========================================================
 
@@ -391,16 +405,20 @@ def main() -> int:
             plt.savefig(f"{video_output_dir}/frames/{seq_idx:05}.png")
             plt.close("all")
             duration = time.time() - start_time
-            print(f"Took {1000*duration:.0f}ms for updating the visualization")
+                
+    print("\n-----------\n")
+    print("Time statistics")
+    print("-----------\n")
+    print(f"Prediction: {np.average(prediction_time_list):.6f}s (stddev: {np.std(prediction_time_list):.6f}s)")
+    print(f"GLOSM updates: {np.average(glosm_update_time_list):.6f}s (stddev: {np.std(glosm_update_time_list):.6f}s)")
+    print(f"ELOFF updates: {np.average(eloff_update_time_list):.6f}s (stddev: {np.std(eloff_update_time_list):.6f}s)")
 
-        print(f"Complete pipeline in the sequence took {time.time()-seq_start_time:.2f}s")
-    
     # OUTPUT
     # =========================================================
     print("-----------\n")
     if config["video"]["record_trajectory"]:
         print(f"Exporting video to `{video_output_dir}`")
-        os.system(f"ffmpeg -framerate 5 -pattern_type glob -i '{video_output_dir}/frames/*.png' {video_output_dir}/{args.sequence_id}.mp4")
+        os.system(f"ffmpeg -framerate {config['video']['output_video_fps']} -pattern_type glob -i '{video_output_dir}/frames/*.png' {video_output_dir}/{args.sequence_id}.mp4")
         os.system(f"rm -rf '{video_output_dir}/frames'")
 
     print("-----------\n")

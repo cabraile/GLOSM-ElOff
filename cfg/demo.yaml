@@ -10,11 +10,13 @@ glosm:
     detector_sensitivity: 0.95
     detector_false_positive_rate: 0.05 
   navigable_area_weight_factor: 0.85
+  map_correction_every_t_seconds: 0.5
 eloff:
   z_offset_stddev: 0.1
-  update_every_n_frames: 4
-  dsm_z_stddev: 0.5
+  update_every_t_seconds: 1.0
+  dsm_z_stddev: 0.03
 video:
   record_trajectory: true
-  store_every_n_frames: 7
+  store_every_n_frames: 10
   region_size_meters: 60.0
+  output_video_fps: 10

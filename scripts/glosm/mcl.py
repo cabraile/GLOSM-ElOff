@@ -167,7 +167,7 @@ class MCLXYZYaw:
             ax.scatter(self.particles[:,0], self.particles[:,1], c="orange", marker="x")
         
     def get_mean(self) -> np.ndarray:
-        """Returns the (x,y,yaw) array of the particles' mean."""
+        """Returns the (x,y,z,yaw) array of the particles' mean."""
         x_mean, y_mean, z_mean = np.average(self.particles[:,:3], axis=0).flatten()
         yaw_mean = circmean(self.particles[:,3], high=np.pi, low = -np.pi,)
         return np.array([ x_mean, y_mean, z_mean, yaw_mean ])

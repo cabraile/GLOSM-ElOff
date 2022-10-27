@@ -103,7 +103,11 @@ class KittiFileReadOdometry:
     is provided in the IMU coordinates.
     """
 
-    def __init__(self, file_path : str, xyz : np.ndarray, rpy : np.ndarray, T_from_imu_to_cam0 : np.ndarray) -> None:
+    def __init__(
+        self, 
+        file_path : str,
+        xyz : np.ndarray, rpy : np.ndarray, T_from_imu_to_cam0 : np.ndarray
+    ) -> None:
         self.T_from_imu_init_to_utm = np.eye(4)
         self.T_from_imu_init_to_utm[:3,:3] = Rotation.from_euler("xyz",rpy,degrees=False).as_matrix()
         self.T_from_imu_init_to_utm[:3,3] = xyz
