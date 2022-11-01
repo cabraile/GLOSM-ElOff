@@ -99,6 +99,9 @@ def split_transform(T) -> Dict[str, float]:
     return {"x" : x, "y" : y, "z" : z, "roll" : roll, "pitch" : pitch, "yaw" : yaw}
 
 class DemoManager:
+    """Class responsible for handling the Kitti input data and managing the 
+    Odometry and MCL.
+    """
 
     def __init__(self, args : argparse.Namespace) -> None:
         self.transforms = dict()
@@ -189,7 +192,10 @@ class DemoManager:
             "eloff" : []
         }
 
-    def register_transform(self, T : np.ndarray, source_frame : str, target_frame : int) -> None:
+    def register_transform(self, T : np.ndarray, source_frame : str, target_frame : str) -> None:
+        """Stores the forward and inverse transformation matrices between the 
+        source and target frames
+        """
         # Stores the forward transform
         if source_frame not in self.transforms:
             self.transforms[source_frame] = dict()
@@ -201,6 +207,7 @@ class DemoManager:
         self.transforms[target_frame][source_frame] = np.linalg.inv(T) # TODO: use closed formula
 
     def load_odometry(self) -> None:
+        """Loads the odometry source (file or slopy)."""
         if self.odometry_mode == "slopy":
             print("> Starting SLOPY")
             self.odometry = LaserOdometry(
@@ -228,6 +235,9 @@ class DemoManager:
             print("> Done")
 
     def spin(self) -> None:
+        """Iterates over all the sequence data from the sequence beginning to 
+        end.
+        """
         print()
         print("Started loop")
         print("======================")
@@ -245,6 +255,7 @@ class DemoManager:
         print(f"> ELOFF updates: {np.average(self.benchmark_time_lists['eloff'])*1000:.2f}ms (stddev: {np.std(self.benchmark_time_lists['eloff'])*1000:.2f}ms)")
 
     def output_results(self) -> None:
+        """Export the video and estimated trajectories' files."""
         print("-----------\n")
         if self.config["video"]["record_trajectory"]:
             print(f"Exporting video to `{self.video_output_dir}`")
@@ -266,6 +277,12 @@ class DemoManager:
                 uncorrected_seq_file.write(output_line)
 
     def iterate(self, seq_idx : int) -> None:
+        """A single iteration of the cycle defined in our paper.
+        
+        Loads the previous' frame IMU data, computes the odometry, apply 
+        prediction to the particles and update them if the time trigger (using 
+        the Kitti timestamps) is activated.
+        """
         # Load input data
         rpy_imu_prev = get_groundtruth_state_as_array(self.kitti_dataloader.oxts[seq_idx-1].packet).flatten()[3:6]
 
@@ -280,6 +297,9 @@ class DemoManager:
             self.draw(seq_idx)
 
     def get_odometry_between_pose(self, seq_idx : int) -> np.ndarray:
+        """Loads the between pose transform from the current frame to the 
+        previous frame using the odometry source.
+        """
         if self.odometry_mode == "slopy":
             lidar_scan  = self.kitti_dataloader.get_velo(seq_idx)
             lidar_pcd = scan_array_to_pointcloud(lidar_scan)
@@ -291,6 +311,9 @@ class DemoManager:
         return T_from_imu_curr_to_imu_prev
 
     def get_odometry_transform(self) -> np.ndarray:
+        """Retrieves the uncorrected odometry estimated georeferenced 
+        position.
+        """
         if self.odometry_mode == "slopy":
             T_from_lidar_to_lidar_init = self.odometry.get_transform_from_frame_to_init()
             T_from_imu_to_imu_init = self.transforms["lidar"]["imu"] @ T_from_lidar_to_lidar_init @ self.transforms["imu"]["lidar"]
@@ -308,6 +331,10 @@ class DemoManager:
         T_from_imu_curr_to_imu_prev : np.ndarray, 
         rpy_imu_prev : np.ndarray
     ) -> None:
+        """Propagates the particles given the transformation from the current 
+        frame to the previous and the Euler angles provided by the IMU in the 
+        previous frame.
+        """
         pose_offset_dict = split_transform(T_from_imu_curr_to_imu_prev)
 
         # Z displacement must be provided in world coordinates
@@ -343,6 +370,7 @@ class DemoManager:
         self.benchmark_time_lists["prediction"].append(duration)
 
     def glosm_update(self, timestamp : float) -> None:
+        """Performs GLOSM correction if the time trigger is activated."""
         delta_T_last_updated = timestamp - self.last_glosm_update_timestamp
         if (delta_T_last_updated >= self.config["glosm"]["map_correction_every_t_seconds"]):
             start_time = time.time()
@@ -356,6 +384,7 @@ class DemoManager:
             self.benchmark_time_lists["glosm"].append(duration)
 
     def eloff_update(self, timestamp : float) -> None:
+        """Performs ELOFF correction if the time trigger is activated."""
         delta_T_last_updated = timestamp - self.last_eloff_update_timestamp 
         if delta_T_last_updated >= self.config["eloff"]["update_every_t_seconds"]:
             start_time = time.time()
@@ -367,6 +396,7 @@ class DemoManager:
             self.benchmark_time_lists["eloff"].append(duration)
 
     def update(self, seq_idx : int) -> None:
+        """Wraps the GLOSM-based and the ELOFF-based correction."""
         timestamp = self.kitti_dataloader.timestamps[seq_idx].timestamp()
         if "glosm" in self.localization_mode:
             self.glosm_update(timestamp)
@@ -374,6 +404,9 @@ class DemoManager:
             self.eloff_update(timestamp)
 
     def draw(self, seq_idx : int) -> None:
+        """Draws the current frame and store to the frame buffer for recording 
+        the videos later.
+        """
         gps_and_imu_data = self.kitti_dataloader.oxts[seq_idx].packet
         groundtruth_mean = get_groundtruth_state_as_array(gps_and_imu_data)
         x_gt, y_gt, yaw_gt = groundtruth_mean.flatten()[[0,1,5]]
@@ -418,6 +451,9 @@ class DemoManager:
         plt.close("all")
 
     def store_current_state(self) -> None:
+        """Stores the estimated MCL and SLOPY states for recording the 
+        trajectories' files later.
+        """
         easting, northing, elevation = self.mcl.get_mean().flatten()[:3]
         yaw = self.mcl.get_mean().flatten()[-1]
         T_from_imu_to_utm = np.eye(4)
