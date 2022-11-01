@@ -118,8 +118,8 @@ class DemoManager:
             self.config = yaml.load(cfg_file,yaml.FullLoader)
 
         self.output_prefix = f"{self.odometry_name}+{self.localization_mode}"
-        self.video_output_dir = f"results/videos/{self.output_prefix}"
-        self.trajectories_output_dir = f"results/trajectories/{self.output_prefix}"
+        self.video_output_dir = f"{self.config['results_dir']}/videos/{self.output_prefix}"
+        self.trajectories_output_dir = f"{self.config['results_dir']}/trajectories/{self.output_prefix}"
         os.system(f"mkdir -p {self.video_output_dir}")
         os.system(f"mkdir -p {self.trajectories_output_dir}/corrected")
         os.system(f"mkdir -p {self.trajectories_output_dir}/uncorrected")
@@ -239,10 +239,10 @@ class DemoManager:
 
         print("\n-----------\n")
         print("Time statistics")
-        print("-----------\n")
-        print(f"Prediction: {np.average(self.benchmark_time_lists['prediction'])*1000:.2f}ms (stddev: {np.std(self.benchmark_time_lists['prediction'])*1000:.2f}ms)")
-        print(f"GLOSM updates: {np.average(self.benchmark_time_lists['glosm'])*1000:.2f}ms (stddev: {np.std(self.benchmark_time_lists['glosm'])*1000:.2f}s)")
-        print(f"ELOFF updates: {np.average(self.benchmark_time_lists['eloff'])*1000:.2f}ms (stddev: {np.std(self.benchmark_time_lists['eloff'])*1000:.2f}ms)")
+        print("-----------")
+        print(f"> Prediction: {np.average(self.benchmark_time_lists['prediction'])*1000:.2f}ms (stddev: {np.std(self.benchmark_time_lists['prediction'])*1000:.2f}ms)")
+        print(f"> GLOSM updates: {np.average(self.benchmark_time_lists['glosm'])*1000:.2f}ms (stddev: {np.std(self.benchmark_time_lists['glosm'])*1000:.2f}ms)")
+        print(f"> ELOFF updates: {np.average(self.benchmark_time_lists['eloff'])*1000:.2f}ms (stddev: {np.std(self.benchmark_time_lists['eloff'])*1000:.2f}ms)")
 
     def output_results(self) -> None:
         print("-----------\n")

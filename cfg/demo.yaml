@@ -1,22 +1,27 @@
-cache_dir: ".cached"
-n_particles: 500
-slopy:
-  voxel_size: 0.25
-  frequency: 10.0
-  distance_threshold: 3.5
+cache_dir: ".cached" # Where the downloaded OSM.PRB files are stored. Will be created if does not exist.
+results_dir: "results" # Where to store the results. Will be created if does not exist.
+n_particles: 500 # Number of particles used in the MCL
+
+# SLOPY-related parameters
+slopy: 
+  voxel_size: 0.25 # Size of the voxels used for downsampling the point cloud (in meters)
+  frequency: 10.0 # The scans frequency received (in Hz)
+  distance_threshold: 3.5 # The maximum distance two point clouds can be apart (in meters)
+
+# GLOSM-related parameters
 glosm:
-  traffic_signals_landmarks:
-    enable: false
-    detector_sensitivity: 0.95
-    detector_false_positive_rate: 0.05 
-  navigable_area_weight_factor: 0.85
-  map_correction_every_t_seconds: 0.5
+  navigable_area_weight_factor: 0.85 # The alpha-factor used for weighing particles inside the navigable area
+  map_correction_every_t_seconds: 0.5 # The period between corrections (in seconds)
+
+# ELOFF-related parameters
 eloff:
-  z_offset_stddev: 0.1
-  update_every_t_seconds: 1.0
-  dsm_z_stddev: 0.03
+  z_offset_stddev: 0.1 # Standard deviation of the elevation for each odometry call (in meters)
+  update_every_t_seconds: 1.0 # The period between corrections (in seconds)
+  dsm_z_stddev: 0.03 # The standard deviation of the DSM values (in meters)
+
+# Video recording parameters
 video:
-  record_trajectory: true
-  store_every_n_frames: 10
-  region_size_meters: 60.0
-  output_video_fps: 10
+  record_trajectory: true # Whether to record the video of the trajectory (true) or not (false)
+  store_every_n_frames: 10 # Skips N frames for the storage. Lower values imply in faster processing.
+  region_size_meters: 60.0 # The region around the groundtruth for providing the map overlay (in meters)
+  output_video_fps: 10 # The output video FPS
