@@ -16,6 +16,7 @@ Related repositories:
 If having trouble for associating the `date`/`drive` to their respective sequences, we provide the mappings under `scripts/demos/kitti/sequence_utils.py`.
 
 # Setup
+For running the demos, we suggest the user to prepare an Anaconda environment using the `environment.yml` file.
 
 # Kitti demo
 For evaluating our method, we implemented a script for running the Kitti sequences under `scripts/demos/kitti/demo_kitti.py`.
