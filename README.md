@@ -1,13 +1,6 @@
 # About
 In this repository we provide the prototype implementation of the MCL GLOSM/ELOFF filter proposed in our paper in [1].
 
-Even though this repository implements the code for reproducing the results presented in [1], we also provide, for the convenience of the readers, the links with the results obtained in our experiments in the links below.
-* [Videos](https://drive.google.com/drive/folders/1Hxd4Wx8YmKxxPYoSmxUOW6Kdlk4OxrRT?usp=share_link)
-* [Trajectory output files](https://drive.google.com/drive/folders/1QBx2z7TTumm5LhN--c_Cp71DJZIXYKDh?usp=share_link)
-* [Detailed metrics' spreadsheet](https://docs.google.com/spreadsheets/d/1aWFTAXCy8KD8N8RbJlWHImM4x3Cwvl-UQu2UBfMs6wY/edit?usp=sharing)
-* [Digital surface maps](https://drive.google.com/drive/folders/1GMxU_V90U7bW9dqKdiR6_qPZxR5k8N-p?usp=share_link)
-* [Point Cloud PLY files](https://drive.google.com/drive/folders/1bFP7Hl6C91-NOYAgEIBzKAg4-jlgxgQk?usp=share_link).
-
 Related repositories:
 * [SLOPY](https://github.com/cabraile/SLOPY): Point-to-plane odometry implemented for validating the approach;
 * [DF-VO](https://github.com/Huangying-Zhan/DF-VO): Odometry source used for comparing SLOPY for the Kitti demo;
